@@ -1,0 +1,17 @@
+# PlatformIO
+.pio
+.vscode
+.pioenvs
+.piolibdeps
+
+# Build artifacts
+*.o
+*.elf
+*.bin
+*.hex
+
+# IDE
+.DS_Store
+*.swp
+*.swo
+*~
