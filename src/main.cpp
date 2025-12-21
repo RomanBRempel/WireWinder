@@ -34,9 +34,13 @@ bool spoolFixed = false;
 
 /**
  * Interrupt handler for PWM input
+ * Uses direct GPIO register read for safe IRAM execution
  */
 void IRAM_ATTR pwmInterrupt() {
-  if (digitalRead(PWM_INPUT_PIN) == HIGH) {
+  // Read GPIO state directly from register (safe in IRAM)
+  bool pinState = (GPIO.in >> PWM_INPUT_PIN) & 0x1;
+  
+  if (pinState) {
     // Rising edge - record time
     pwmRisingTime = micros();
   } else {
@@ -101,13 +105,17 @@ void loop() {
   
   // Process PWM input if new data available
   if (pwmNewData) {
+    // Read pulse width atomically by temporarily disabling interrupts
+    noInterrupts();
+    unsigned long localPulseWidth = pwmPulseWidth;
     pwmNewData = false;
+    interrupts();
     
     // Convert PWM pulse width to servo angle
-    windingSpeed = mapPWMToServoAngle(pwmPulseWidth);
+    windingSpeed = mapPWMToServoAngle(localPulseWidth);
     
     Serial.print("PWM Pulse: ");
-    Serial.print(pwmPulseWidth);
+    Serial.print(localPulseWidth);
     Serial.print(" us -> Winding Speed: ");
     Serial.println(windingSpeed);
   }
