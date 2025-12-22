@@ -7,15 +7,19 @@ static const int PIN_INPUT1 = 16;   // PWM input 1 (winding motor control)
 static const int PIN_INPUT2 = 17;   // PWM input 2 (gate open/close)
 static const int PIN_SERVO1 = 19;   // Servo output 1 (winding motor)
 static const int PIN_SERVO2 = 18;   // Servo output 2 (gate)
+// UART for external communication (Serial1)
+static const int PIN_UART_RX = 21;  // Serial1 RX
+static const int PIN_UART_TX = 22;  // Serial1 TX
 
 // Servo 1 (winding motor) pulse bounds in microseconds
 static const uint16_t SERVO1_MIN_US = 500;
 static const uint16_t SERVO1_MAX_US = 2500;
-static const uint16_t SERVO1_NEUTRAL_US = 1500;
+static const uint16_t SERVO1_NEUTRAL_US = 1550;
 
 // Servo 2 (gate) pulse bounds in microseconds
 static const uint16_t SERVO2_MIN_US = 1100;
 static const uint16_t SERVO2_MAX_US = 1900;
+static const uint16_t SERVO2_NEUTRAL_US = 1540;
 static const uint16_t SERVO2_CLOSED_US = 1200;   // Gate closed position
 static const uint16_t SERVO2_OPEN_US = 2000;     // Gate open position
 
@@ -45,17 +49,54 @@ SystemState currentState = STATE_IDLE;
 volatile unsigned long pulseCount = 0;
 unsigned long lastLimitPulseTime = 0;   // Time of last endstop pulse
 unsigned long lastServo1UpdateTime = 0; // Time of last servo1 update
-uint16_t lastInput1Value = INPUT_NEUTRAL; // Last valid input1 value
-uint16_t lastInput2Value = INPUT_NEUTRAL; // Last valid input2 value
 volatile unsigned long endstopPulseCount = 0;    // Total endstop rising-edge pulses seen (updated in ISR)
 volatile bool endstopPulseFlag = false; // Set by ISR when pulse seen
-uint16_t currentServo1Pulse = SERVO1_NEUTRAL_US; // Last written pulse for servo1
-uint16_t currentServo2Pulse = SERVO2_CLOSED_US; // Last written pulse for servo2
 bool servo1PhaseSubtract = true;       // Start with subtract phase
 bool allowWinding = true;
 bool allowUnwinding = true;
 // Remember which direction caused the last ERROR so recovery can be restricted
 SystemState errorFromState = STATE_IDLE;
+
+// Runtime tracked values for servos and last inputs
+static uint16_t currentServo1Pulse = SERVO1_NEUTRAL_US;
+static uint16_t currentServo2Pulse = SERVO2_CLOSED_US;
+static unsigned long lastInput1Value = INPUT_NEUTRAL;
+static unsigned long lastInput2Value = INPUT_NEUTRAL;
+
+// Debug printing helpers
+#include <stdarg.h>
+static unsigned long startupBlockUntil = 0; // kept for compatibility (0 = no block)
+static void dbgPrintf(const char *fmt, ...) {
+	va_list args;
+	va_start(args, fmt);
+	char buf[256];
+	vsnprintf(buf, sizeof(buf), fmt, args);
+	va_end(args);
+	Serial.print(buf);
+}
+
+static void dbgPrintln(const char *s) {
+	Serial.println(s);
+}
+
+// Arming / command-waiting: require channel1 to send a max PWM then neutral
+static bool waitingForArm = true;
+static bool seenArmMax = false;
+static const uint16_t ARM_MAX_THRESHOLD = 1900; // treat >= this as 'maximum' command
+static const uint16_t ARM_MIN_ACCEPT = 500;
+static const uint16_t ARM_MAX_ACCEPT = 2500;
+
+// LED indicator (built-in)
+static const int LED_PIN = 2; // onboard LED on most ESP32 dev boards
+enum LedMode { LED_OFF=0, LED_SLOW, LED_FAST, LED_ON };
+static LedMode ledMode = LED_OFF;
+static bool ledState = false;
+static unsigned long lastLedToggle = 0;
+
+// Non-blocking startup servo timing (0 = none)
+static unsigned long startupServo1Until = 0;
+// Diagnostics timer while waiting for arm
+static unsigned long lastArmDiag = 0;
 
 static inline uint16_t clampServo1(unsigned long us) {
 	if (us < SERVO1_MIN_US) return SERVO1_MIN_US;
@@ -71,6 +112,11 @@ static inline bool isInDeadzone(unsigned long pulse) {
 	       (pulse <= (INPUT_NEUTRAL + INPUT_DEADZONE));
 }
 
+// Generic pulse accept/filter function for ranges
+static inline bool pulseInAcceptRange(unsigned long pulse, unsigned long minVal, unsigned long maxVal) {
+	return (pulse >= minVal) && (pulse <= maxVal);
+}
+
 // Compute servo1 pulse: limit to ±100 µs from neutral on the side of motion
 static inline uint16_t computeServo1FromInput(uint16_t input) {
 	// Return the clamped input as the target; stepping logic will limit per-interval change
@@ -78,14 +124,47 @@ static inline uint16_t computeServo1FromInput(uint16_t input) {
 	return clampServo1((unsigned long)input);
 }
 
+// Set servo1 to neutral with a small 'nudge' away then back.
+// Sequence: neutral -> offset (30 µs toward previous value) -> neutral.
+static void setServo1NeutralSequence() {
+	const uint16_t neutral = SERVO1_NEUTRAL_US;
+	// write neutral first
+	servo1.writeMicroseconds(neutral);
+	// determine direction based on previous/current pulse
+	uint16_t prev = currentServo1Pulse;
+	const uint16_t offset = 30;
+	uint16_t shifted;
+	if (prev > neutral) {
+		shifted = clampServo1((unsigned long)neutral + offset);
+	} else if (prev < neutral) {
+		shifted = clampServo1((unsigned long)neutral - offset);
+	} else {
+		// if equal, nudge upward
+		shifted = clampServo1((unsigned long)neutral + offset);
+	}
+	
+	servo1.writeMicroseconds(shifted);
+	
+	servo1.writeMicroseconds(neutral);
+	currentServo1Pulse = neutral;
+}
+
 void setup() {
 	Serial.begin(115200);
 	delay(100);
-	Serial.println("WireWinder (ESP32Servo): starting");
+	// No startup delay for serial output
+	startupBlockUntil = 0;
+	dbgPrintln("WireWinder (ESP32Servo): starting");
+
+	// Initialize hardware UART (Serial1) on pins RX=21, TX=22
+	Serial1.begin(115200, SERIAL_8N1, PIN_UART_RX, PIN_UART_TX);
+	dbgPrintln("Serial1 initialized on RX=21 TX=22 (115200)");
 
 	pinMode(PIN_LIMIT, INPUT_PULLDOWN);
 	pinMode(PIN_INPUT1, INPUT);
 	pinMode(PIN_INPUT2, INPUT);
+	// LED pin
+	pinMode(LED_PIN, OUTPUT);
 
 	// Attach interrupt on rising edge for endstop to avoid missing pulses
 	attachInterrupt(digitalPinToInterrupt(PIN_LIMIT), []() {
@@ -104,12 +183,13 @@ void setup() {
 	servo1.attach(PIN_SERVO1, SERVO1_MIN_US, SERVO1_MAX_US);
 	servo2.attach(PIN_SERVO2, SERVO2_MIN_US, SERVO2_MAX_US);
 
-	// Neutral on startup
+	// Startup sequence: briefly drive servo1 to 1300 µs, then return to neutral (non-blocking)
+	servo1.writeMicroseconds(1450);
 	servo1.writeMicroseconds(SERVO1_NEUTRAL_US);
-	currentServo1Pulse = SERVO1_NEUTRAL_US;
+
 	servo2.writeMicroseconds(SERVO2_CLOSED_US);
 	currentServo2Pulse = SERVO2_CLOSED_US;
-	
+    
 	lastServo1UpdateTime = millis();
 }
 
@@ -129,11 +209,93 @@ void loop() {
 		lastLimitPulseTime = now;
 		// Print summary for diagnostics (pulseCount updated in ISR)
 		unsigned long revs = pulseCount / PULSES_PER_REVOLUTION;
-		Serial.printf("Endstop event: %lu pulses -> %lu/%d revolutions\n", pulseCount, revs, MAX_REVOLUTIONS);
+		dbgPrintf("Endstop event: %lu pulses -> %lu/%d revolutions\n", pulseCount, revs, MAX_REVOLUTIONS);
 	}
 
-	// Process INPUT1 for winding motor control
-	if (pulse1 > 0) {
+	// Handle non-blocking startup servo1 restore
+	if (startupServo1Until != 0 && now >= startupServo1Until) {
+		setServo1NeutralSequence();
+		startupServo1Until = 0;
+	}
+
+	// LED mode selection
+	LedMode targetLedMode = LED_OFF;
+	if (waitingForArm) {
+		targetLedMode = LED_SLOW;
+	} else if (currentState == STATE_ERROR) {
+		targetLedMode = LED_FAST;
+	} else if (!waitingForArm && currentState == STATE_IDLE) {
+		targetLedMode = LED_ON;
+	} else {
+		targetLedMode = LED_OFF;
+	}
+	// apply mode change
+	if (targetLedMode != ledMode) {
+		ledMode = targetLedMode;
+		ledState = false;
+		digitalWrite(LED_PIN, LOW);
+		lastLedToggle = now;
+	}
+	// update LED according to mode (non-blocking)
+	if (ledMode == LED_SLOW) {
+		const unsigned long interval = 500UL;
+		if (now - lastLedToggle >= interval) {
+			ledState = !ledState;
+			digitalWrite(LED_PIN, ledState ? HIGH : LOW);
+			lastLedToggle = now;
+		}
+	} else if (ledMode == LED_FAST) {
+		const unsigned long interval = 100UL;
+		if (now - lastLedToggle >= interval) {
+			ledState = !ledState;
+			digitalWrite(LED_PIN, ledState ? HIGH : LOW);
+			lastLedToggle = now;
+		}
+	} else if (ledMode == LED_ON) {
+		if (!ledState) {
+			ledState = true;
+			digitalWrite(LED_PIN, HIGH);
+		}
+	} else { // LED_OFF
+		if (ledState) {
+			ledState = false;
+			digitalWrite(LED_PIN, LOW);
+		}
+	}
+
+	// Arming sequence: require a MAX on channel1 then a neutral to enable inputs
+	if (waitingForArm) {
+		// Only consider pulses in arm-accept range
+		if (pulseInAcceptRange(pulse1, ARM_MIN_ACCEPT, ARM_MAX_ACCEPT)) {
+			// detect max pulse (allow pulses >= ARM_MAX_THRESHOLD)
+			if (pulse1 >= ARM_MAX_THRESHOLD) {
+				seenArmMax = true;
+				dbgPrintln("Arm: saw max pulse on channel1");
+			}
+			// if we've seen max and now neutral, finish arming
+			if (seenArmMax && isInDeadzone(pulse1)) {
+				waitingForArm = false;
+				dbgPrintln("Armed: channel1 max->neutral sequence received");
+			}
+		} else {
+			// out-of-range pulses are ignored for arming
+		}
+		// print diagnostics about inputs while waiting for arm (rate-limited)
+		if (now - lastArmDiag >= 500UL) {
+			dbgPrintf("ARM WAIT DIAG: pulse1:%uus pulse2:%uus seenMax:%d\n", pulse1, pulse2, seenArmMax ? 1 : 0);
+			lastArmDiag = now;
+		}
+		// while waiting, hold servos safe and ignore other inputs
+		setServo1NeutralSequence();
+		servo2.writeMicroseconds(SERVO2_CLOSED_US);
+		currentServo2Pulse = SERVO2_CLOSED_US;
+		// skip normal control until armed
+		return;
+	}
+
+	// Process INPUT1 for winding motor control (only when armed)
+	// Accept only pulses in valid control range [800..2000]
+	if (pulseInAcceptRange(pulse1, 800, 2000)) {
 		lastInput1Value = pulse1;
 	}
 
@@ -156,7 +318,7 @@ void loop() {
 				// keep currentState == STATE_ERROR
 			} else {
 				// input is neutral, clear ERROR to IDLE but keep the original error direction blocked
-				Serial.println("Recovered: input neutral, clearing ERROR to IDLE (errored direction remains blocked)");
+					dbgPrintln("Recovered: input neutral, clearing ERROR to IDLE (errored direction remains blocked)");
 				if (errorFromState == STATE_WINDING) {
 					allowWinding = false;
 					allowUnwinding = true;
@@ -171,15 +333,15 @@ void loop() {
 			}
 		} else {
 			if (newState == STATE_IDLE) {
-				Serial.println("State: IDLE");
-				currentServo1Pulse = SERVO1_NEUTRAL_US;
+					dbgPrintln("State: IDLE");
+				setServo1NeutralSequence();
 				currentState = STATE_IDLE;
 			} else if (newState == STATE_WINDING) {
 				if (!allowWinding) {
-					Serial.println("Transition to WINDING blocked (direction not allowed)");
+						dbgPrintln("Transition to WINDING blocked (direction not allowed)");
 					// ignore transition
 				} else {
-					Serial.println("State: WINDING");
+					dbgPrintln("State: WINDING");
 					if (allowWinding) pulseCount = 0;
 					lastLimitPulseTime = now;
 					servo1PhaseSubtract = true;
@@ -187,10 +349,10 @@ void loop() {
 				}
 			} else if (newState == STATE_UNWINDING) {
 				if (!allowUnwinding) {
-					Serial.println("Transition to UNWINDING blocked (direction not allowed)");
+						dbgPrintln("Transition to UNWINDING blocked (direction not allowed)");
 					// ignore transition
 				} else {
-					Serial.println("State: UNWINDING");
+					dbgPrintln("State: UNWINDING");
 					if (allowUnwinding) pulseCount = 0;
 					lastLimitPulseTime = now;
 					servo1PhaseSubtract = true;
@@ -205,7 +367,7 @@ void loop() {
 			// Check revolution limit using pulseCount
 			unsigned long revs = pulseCount / PULSES_PER_REVOLUTION;
 			if (revs >= (unsigned)MAX_REVOLUTIONS) {
-				Serial.println("Max revolutions reached");
+					dbgPrintln("Max revolutions reached");
 				// block further motion in the same direction, allow only reverse
 				if (currentState == STATE_WINDING) {
 					allowWinding = false;
@@ -214,8 +376,8 @@ void loop() {
 					allowUnwinding = false;
 					allowWinding = true;
 				}
-				// stop movement now (logical neutral; control loop will write)
-				currentServo1Pulse = SERVO1_NEUTRAL_US;
+				// stop movement now (logical neutral; use neutral sequence)
+				setServo1NeutralSequence();
 				currentState = STATE_IDLE;
 			} else {
 				// under limit, allow both directions
@@ -225,7 +387,7 @@ void loop() {
 		
 		// Check timeout (no pulses for 48 seconds)
 		if (now - lastLimitPulseTime > PULSE_TIMEOUT_MS) {
-			Serial.println("ERROR: No endstop pulses for 48 seconds");
+				dbgPrintln("ERROR: No endstop pulses for 48 seconds");
 			// remember which direction caused the error, block that direction on recovery
 			errorFromState = currentState;
 			if (errorFromState == STATE_WINDING) {
@@ -236,8 +398,8 @@ void loop() {
 				allowWinding = true;
 			}
 			currentState = STATE_ERROR;
-			// mark logical neutral; control loop will handle writes
-			currentServo1Pulse = SERVO1_NEUTRAL_US;
+			// mark logical neutral; perform neutral sequence now
+			setServo1NeutralSequence();
 		}
 	}
 
@@ -313,11 +475,10 @@ void loop() {
 		}
 	} else if (currentState == STATE_ERROR) {
 		// Hold physical servo at neutral while in error and wait for input to return to neutral
-		servo1.writeMicroseconds(SERVO1_NEUTRAL_US);
-		currentServo1Pulse = SERVO1_NEUTRAL_US;
+		setServo1NeutralSequence();
 		// If input1 is back to neutral, clear ERROR to IDLE but keep the original direction blocked
-		if (pulse1 > 0 && isInDeadzone(pulse1)) {
-			Serial.println("Recovered: input neutral, clearing ERROR to IDLE (original direction still blocked)");
+		if (pulseInAcceptRange(pulse1, 800, 2000) && isInDeadzone(pulse1)) {
+						dbgPrintln("Recovered: input neutral, clearing ERROR to IDLE (original direction still blocked)");
 			// Keep only the opposite direction allowed
 			if (errorFromState == STATE_WINDING) {
 				allowWinding = false;
@@ -336,7 +497,8 @@ void loop() {
 	}
 
 	// Track INPUT2 and control SERVO2 only when deviating from neutral (deadzone)
-	if (pulse2 > 0) {
+	// Accept only pulses in valid control range [800..2000]
+	if (pulseInAcceptRange(pulse2, 800, 2000)) {
 		lastInput2Value = pulse2;
 	}
 
@@ -347,10 +509,10 @@ void loop() {
 		uint16_t target2 = currentServo2Pulse; // default: no change
 		if (lastInput2Value > upper) {
 			// Above neutral => closed
-			target2 = SERVO2_CLOSED_US;
+			target2 = SERVO2_OPEN_US;
 		} else if (lastInput2Value < lower) {
 			// Below neutral => open
-			target2 = SERVO2_OPEN_US;
+			target2 = SERVO2_CLOSED_US;
 		} else {
 			// within deadzone: do not change state
 		}
@@ -377,7 +539,7 @@ void loop() {
 			}
 			remainingSec = (unsigned long)((remainingMs + 500) / 1000); // round to nearest second
 		}
-		Serial.printf("State:%d Input1:%uus Input2:%luus Rev:%lurevs (%lupulses) Endstop:%lu S1:%uus S2:%uus Remain:%lus\n",
+		dbgPrintf("State:%d Input1:%uus Input2:%luus Rev:%lurevs (%lupulses) Endstop:%lu S1:%uus S2:%uus Remain:%lus\n",
 				  currentState, lastInput1Value, pulse2, revolutions, pulseCount, endstopPulseCount, currentServo1Pulse, currentServo2Pulse, remainingSec);
 		lastPrint = now;
 	}
