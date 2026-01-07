@@ -1,6 +1,10 @@
 ﻿#include <Arduino.h>
 #include <ESP32Servo.h>
 
+// Servo objects
+Servo servo1;
+Servo servo2;
+
 // Pin assignments
 static const int PIN_LIMIT = 4;     // Endstop: to +3.3V via switch, external pulldown ~2.3 kOhm to GND
 static const int PIN_INPUT1 = 16;   // PWM input 1 (winding motor control)
@@ -14,7 +18,7 @@ static const int PIN_UART_TX = 22;  // Serial1 TX
 // Servo 1 (winding motor) pulse bounds in microseconds
 static const uint16_t SERVO1_MIN_US = 500;
 static const uint16_t SERVO1_MAX_US = 2500;
-static const uint16_t SERVO1_NEUTRAL_US = 1550;
+static const uint16_t SERVO1_NEUTRAL_US = 1500;
 
 // Servo 2 (gate) pulse bounds in microseconds
 static const uint16_t SERVO2_MIN_US = 1100;
@@ -26,8 +30,10 @@ static const uint16_t SERVO2_OPEN_US = 2000;     // Gate open position
 // Control parameters
 static const uint16_t INPUT_DEADZONE = 30;        // Deadzone around neutral (±30 µs)
 static const uint16_t INPUT_NEUTRAL = 1500;       // Neutral position
-static const uint32_t PULSE_TIMEOUT_MS = 60000;    // 48 seconds without pulses = error
-static const uint32_t SERVO1_UPDATE_INTERVAL = 50; // Update servo1 every 500ms ±30ms
+// Timeouts for endstop pulse absence (per direction)
+static const uint32_t PULSE_TIMEOUT_WIND_MS = 93000;   // 90 seconds without pulses = error (winding)
+static const uint32_t PULSE_TIMEOUT_UNWIND_MS = 80000; // 80 seconds without pulses = error (unwinding)
+static const uint32_t SERVO1_UPDATE_INTERVAL = 30; // Update servo1 every 500ms ±30ms
 static const int PULSES_PER_REVOLUTION = 4;       // 4 endstop pulses = 1 revolution
 static const int MAX_REVOLUTIONS = 3;            // Max revolutions in each direction
 static const uint16_t SERVO1_MAX_STEP = 50;     // Max change (µs) per update interval
@@ -40,9 +46,6 @@ enum SystemState {
 	STATE_ERROR           // Error condition, motors stopped
 };
 
-Servo servo1;
-Servo servo2;
-
 // Global state variables
 SystemState currentState = STATE_IDLE;
 // pulseCount: total endstop pulses counted, range [0 .. MAX_REVOLUTIONS * PULSES_PER_REVOLUTION]
@@ -51,11 +54,24 @@ unsigned long lastLimitPulseTime = 0;   // Time of last endstop pulse
 unsigned long lastServo1UpdateTime = 0; // Time of last servo1 update
 volatile unsigned long endstopPulseCount = 0;    // Total endstop rising-edge pulses seen (updated in ISR)
 volatile bool endstopPulseFlag = false; // Set by ISR when pulse seen
+// Accumulated time (ms) counted toward the no-pulse timeout when user stops the process
+static unsigned long accumulatedWindMs = 0;
+static unsigned long accumulatedUnwindMs = 0;
+// Time when current WINDING/UNWINDING active segment started (timer-based logic)
+static unsigned long lastStateActiveTime = 0;
+// At startup we may assume spool is fully wound; this flag prevents resetting
+// `pulseCount` to zero on the first motion so unwinding will decrement from max.
+static bool startupSpoolAssumedFull = false;
+// Ensure startup-only timer initialization runs once
+static bool initialTimersInitialized = false;
 bool servo1PhaseSubtract = true;       // Start with subtract phase
 bool allowWinding = true;
 bool allowUnwinding = true;
 // Remember which direction caused the last ERROR so recovery can be restricted
 SystemState errorFromState = STATE_IDLE;
+// Remember last active direction before going to IDLE so accumulated timers
+// survive a stop-and-start and can be transferred when direction changes.
+static SystemState lastActiveDirection = STATE_IDLE;
 
 // Runtime tracked values for servos and last inputs
 static uint16_t currentServo1Pulse = SERVO1_NEUTRAL_US;
@@ -169,14 +185,10 @@ void setup() {
 	// Attach interrupt on rising edge for endstop to avoid missing pulses
 	attachInterrupt(digitalPinToInterrupt(PIN_LIMIT), []() {
 		// ISR: increment total endstop event count and set flag; update pulseCount based on direction
+		// Only record that a pulse happened; do NOT modify `pulseCount` when
+		// operating in timer-only mode (endstop ignored for logic).
 		endstopPulseCount++;
 		endstopPulseFlag = true;
-		const unsigned long MAX_PULSES = (unsigned long)MAX_REVOLUTIONS * (unsigned long)PULSES_PER_REVOLUTION;
-		if (currentState == STATE_WINDING) {
-			if (pulseCount < MAX_PULSES) pulseCount++;
-		} else if (currentState == STATE_UNWINDING) {
-			if (pulseCount > 0) pulseCount--;
-		}
 	}, RISING);
 
 	// Attach servos with min/max pulse bounds
@@ -190,6 +202,14 @@ void setup() {
 	servo2.writeMicroseconds(SERVO2_CLOSED_US);
 	currentServo2Pulse = SERVO2_CLOSED_US;
     
+	// Start with spool considered fully wound: set pulseCount to maximum
+	pulseCount = (unsigned long)MAX_REVOLUTIONS * (unsigned long)PULSES_PER_REVOLUTION;
+	// Block further winding at startup, allow only unwinding
+	allowWinding = false;
+	allowUnwinding = true;
+	startupSpoolAssumedFull = true;
+	dbgPrintf("Startup: spool assumed fully wound (%lu pulses)\n", pulseCount);
+
 	lastServo1UpdateTime = millis();
 }
 
@@ -206,10 +226,12 @@ void loop() {
 	// Process any endstop pulses flagged by the ISR
 	if (endstopPulseFlag) {
 		endstopPulseFlag = false;
-		lastLimitPulseTime = now;
-		// Print summary for diagnostics (pulseCount updated in ISR)
+		// We intentionally IGNORE endstop pulses for control logic; keep the
+		// diagnostic counter and clear the startup assumption so pulseCount
+		// won't be forcibly left at startup max.
 		unsigned long revs = pulseCount / PULSES_PER_REVOLUTION;
-		dbgPrintf("Endstop event: %lu pulses -> %lu/%d revolutions\n", pulseCount, revs, MAX_REVOLUTIONS);
+		dbgPrintf("Endstop event (ignored for control): %lu pulses -> %lu/%d revolutions\n", pulseCount, revs, MAX_REVOLUTIONS);
+		startupSpoolAssumedFull = false;
 	}
 
 	// Handle non-blocking startup servo1 restore
@@ -303,9 +325,9 @@ void loop() {
 	SystemState newState = STATE_IDLE;
 	if (!isInDeadzone(lastInput1Value)) {
 		if (lastInput1Value > INPUT_NEUTRAL) {
-			newState = STATE_WINDING;
-		} else {
 			newState = STATE_UNWINDING;
+		} else {
+			newState = STATE_WINDING;
 		}
 	}
 
@@ -334,6 +356,10 @@ void loop() {
 		} else {
 			if (newState == STATE_IDLE) {
 					dbgPrintln("State: IDLE");
+				// remember which direction we just came from
+				lastActiveDirection = currentState;
+				// mark no active segment
+				lastStateActiveTime = 0;
 				setServo1NeutralSequence();
 				currentState = STATE_IDLE;
 			} else if (newState == STATE_WINDING) {
@@ -341,9 +367,49 @@ void loop() {
 						dbgPrintln("Transition to WINDING blocked (direction not allowed)");
 					// ignore transition
 				} else {
+					// If starting WINDING from IDLE (cold start), initialize timers:
+					// wind elapsed = 0 (full remaining), unwind elapsed = full timeout (zero remaining)
+					if (startupSpoolAssumedFull && !initialTimersInitialized) {
+						accumulatedWindMs = 0;
+						accumulatedUnwindMs = PULSE_TIMEOUT_UNWIND_MS;
+						dbgPrintf("START: WIND accumWind:%lums accumUnw:%lums\n", accumulatedWindMs, accumulatedUnwindMs);
+						initialTimersInitialized = true;
+						startupSpoolAssumedFull = false;
+					}
 					dbgPrintln("State: WINDING");
-					if (allowWinding) pulseCount = 0;
-					lastLimitPulseTime = now;
+					// If switching from the opposite direction, account for time spent
+					// in that previous direction toward the new direction's timeout.
+					if (currentState == STATE_UNWINDING) {
+						// We were unwinding and now start winding: add the active segment
+						// to the *unwind* accumulator (it represents time spent unwinding).
+						unsigned long seg = 0;
+						if (lastStateActiveTime != 0 && now >= lastStateActiveTime) seg = now - lastStateActiveTime;
+						unsigned long beforeUnw = accumulatedUnwindMs;
+						accumulatedUnwindMs += seg;
+						if (accumulatedUnwindMs > PULSE_TIMEOUT_UNWIND_MS) accumulatedUnwindMs = PULSE_TIMEOUT_UNWIND_MS;
+						dbgPrintf("TRANSFER: UNW->W: beforeUnw:%lums seg:%lums afterUnw:%lums\n", beforeUnw, seg, accumulatedUnwindMs);
+						// Compute desired remaining winding time = priorUnwind + scaled diff
+						unsigned long diff = (PULSE_TIMEOUT_WIND_MS > PULSE_TIMEOUT_UNWIND_MS) ?
+							(PULSE_TIMEOUT_WIND_MS - PULSE_TIMEOUT_UNWIND_MS) :
+							(PULSE_TIMEOUT_UNWIND_MS - PULSE_TIMEOUT_WIND_MS);
+						unsigned long scaled = 0;
+						if (accumulatedUnwindMs > 0 && PULSE_TIMEOUT_UNWIND_MS > 0) {
+							unsigned long long prod = (unsigned long long)diff * (unsigned long long)accumulatedUnwindMs;
+							scaled = (unsigned long)(prod / (unsigned long long)PULSE_TIMEOUT_UNWIND_MS);
+						}
+						unsigned long desiredRemain = accumulatedUnwindMs + scaled;
+						// Set accumulatedWindMs so that remaining = desiredRemain
+						if (desiredRemain >= PULSE_TIMEOUT_WIND_MS) accumulatedWindMs = 0;
+						else accumulatedWindMs = PULSE_TIMEOUT_WIND_MS - desiredRemain;
+						dbgPrintf("TRANSFER: UNW->W: desiredRemain:%lums set accumulatedWindMs:%lums\n", desiredRemain, accumulatedWindMs);
+					} else if (lastActiveDirection == STATE_UNWINDING) {
+						// Previously stopped while unwinding and now starting winding after IDLE.
+						// Do not modify accumulators on stop->start; keep previously accumulated values.
+						dbgPrintf("TRANSFER(stop)->W: previous was UNW, no accumulator change\n");
+						lastActiveDirection = STATE_IDLE;
+					}
+					if (allowWinding && !startupSpoolAssumedFull) pulseCount = 0;
+					lastStateActiveTime = now;
 					servo1PhaseSubtract = true;
 					currentState = STATE_WINDING;
 				}
@@ -352,9 +418,44 @@ void loop() {
 						dbgPrintln("Transition to UNWINDING blocked (direction not allowed)");
 					// ignore transition
 				} else {
+					// If starting UNWINDING from IDLE (cold start), initialize timers:
+					// unwind elapsed = 0 (full remaining), wind elapsed = full timeout (zero remaining)
+					if (startupSpoolAssumedFull && !initialTimersInitialized) {
+						accumulatedUnwindMs = 0;
+						accumulatedWindMs = PULSE_TIMEOUT_WIND_MS;
+						dbgPrintf("START: UNW accumUnw:%lums accumWind:%lums\n", accumulatedUnwindMs, accumulatedWindMs);
+						initialTimersInitialized = true;
+						startupSpoolAssumedFull = false;
+					}
 					dbgPrintln("State: UNWINDING");
-					if (allowUnwinding) pulseCount = 0;
-					lastLimitPulseTime = now;
+					// If switching from the opposite direction, account for time spent
+					// in that previous direction toward the new direction's timeout.
+					if (currentState == STATE_WINDING) {
+						unsigned long seg = 0;
+						if (lastStateActiveTime != 0 && now >= lastStateActiveTime) seg = now - lastStateActiveTime;
+						accumulatedWindMs += seg;
+						if (accumulatedWindMs > PULSE_TIMEOUT_WIND_MS) accumulatedWindMs = PULSE_TIMEOUT_WIND_MS;
+						// Compute desired remaining unwind time = windAccum + diff scaled by proportion
+						unsigned long diff = (PULSE_TIMEOUT_WIND_MS > PULSE_TIMEOUT_UNWIND_MS) ?
+							(PULSE_TIMEOUT_WIND_MS - PULSE_TIMEOUT_UNWIND_MS) :
+							(PULSE_TIMEOUT_UNWIND_MS - PULSE_TIMEOUT_WIND_MS);
+						unsigned long scaled = 0;
+						if (accumulatedWindMs > 0 && PULSE_TIMEOUT_WIND_MS > 0) {
+							unsigned long long prod = (unsigned long long)diff * (unsigned long long)accumulatedWindMs;
+							scaled = (unsigned long)(prod / (unsigned long long)PULSE_TIMEOUT_WIND_MS);
+						}
+						unsigned long desiredRemain = accumulatedWindMs + scaled;
+						if (desiredRemain >= PULSE_TIMEOUT_UNWIND_MS) accumulatedUnwindMs = 0;
+						else accumulatedUnwindMs = PULSE_TIMEOUT_UNWIND_MS - desiredRemain;
+						dbgPrintf("TRANSFER: W->UNW: desiredRemain:%lums set accumulatedUnwindMs:%lums\n", desiredRemain, accumulatedUnwindMs);
+					} else if (lastActiveDirection == STATE_WINDING) {
+						// Previously stopped while winding and now starting unwinding after IDLE.
+						// Do not modify accumulators on stop->start; keep previously accumulated values.
+						dbgPrintf("TRANSFER(stop)->UNW: previous was WIND, no accumulator change\n");
+						lastActiveDirection = STATE_IDLE;
+					}
+					if (allowUnwinding && !startupSpoolAssumedFull) pulseCount = 0;
+					lastStateActiveTime = now;
 					servo1PhaseSubtract = true;
 					currentState = STATE_UNWINDING;
 				}
@@ -362,32 +463,46 @@ void loop() {
 		}
 	}
 
-	// Check for errors
+	// Update accumulators while active and check for errors
 	if (currentState == STATE_WINDING || currentState == STATE_UNWINDING) {
-			// Check revolution limit using pulseCount
-			unsigned long revs = pulseCount / PULSES_PER_REVOLUTION;
-			if (revs >= (unsigned)MAX_REVOLUTIONS) {
-					dbgPrintln("Max revolutions reached");
-				// block further motion in the same direction, allow only reverse
+		// compute elapsed since last active sample and apply to both accumulators
+		if (lastStateActiveTime == 0) {
+			// just entered active state; initialize timestamp
+			lastStateActiveTime = now;
+		} else if (now >= lastStateActiveTime) {
+			unsigned long seg = now - lastStateActiveTime;
+			if (seg > 0) {
 				if (currentState == STATE_WINDING) {
-					allowWinding = false;
-					allowUnwinding = true;
-				} else if (currentState == STATE_UNWINDING) {
-					allowUnwinding = false;
-					allowWinding = true;
+					// increase wind elapsed (reduces wind remaining)
+					accumulatedWindMs += seg;
+					if (accumulatedWindMs > PULSE_TIMEOUT_WIND_MS) accumulatedWindMs = PULSE_TIMEOUT_WIND_MS;
+					// decrease unwind elapsed proportionally so unwind remaining increases
+					unsigned long reduce = (unsigned long)((unsigned long long)seg * (unsigned long long)PULSE_TIMEOUT_UNWIND_MS / (unsigned long long)PULSE_TIMEOUT_WIND_MS);
+					if (reduce >= accumulatedUnwindMs) accumulatedUnwindMs = 0;
+					else accumulatedUnwindMs -= reduce;
+				} else {
+					// UNWINDING: increase unwind elapsed, decrease wind elapsed proportionally
+					accumulatedUnwindMs += seg;
+					if (accumulatedUnwindMs > PULSE_TIMEOUT_UNWIND_MS) accumulatedUnwindMs = PULSE_TIMEOUT_UNWIND_MS;
+					unsigned long reduce = (unsigned long)((unsigned long long)seg * (unsigned long long)PULSE_TIMEOUT_WIND_MS / (unsigned long long)PULSE_TIMEOUT_UNWIND_MS);
+					if (reduce >= accumulatedWindMs) accumulatedWindMs = 0;
+					else accumulatedWindMs -= reduce;
 				}
-				// stop movement now (logical neutral; use neutral sequence)
-				setServo1NeutralSequence();
-				currentState = STATE_IDLE;
-			} else {
-				// under limit, allow both directions
-				allowWinding = true;
-				allowUnwinding = true;
+				// advance sample time
+				lastStateActiveTime = now;
 			}
+		}
+			// Update allow flags based on remaining times (do not allow direction if remaining == 0)
+			unsigned long remWind = (accumulatedWindMs >= PULSE_TIMEOUT_WIND_MS) ? 0 : (PULSE_TIMEOUT_WIND_MS - accumulatedWindMs);
+			unsigned long remUnw = (accumulatedUnwindMs >= PULSE_TIMEOUT_UNWIND_MS) ? 0 : (PULSE_TIMEOUT_UNWIND_MS - accumulatedUnwindMs);
+			allowWinding = (remWind > 0);
+			allowUnwinding = (remUnw > 0);
 		
-		// Check timeout (no pulses for 48 seconds)
-		if (now - lastLimitPulseTime > PULSE_TIMEOUT_MS) {
-				dbgPrintln("ERROR: No endstop pulses for 48 seconds");
+		// Check timeout (no pulses for configured timeout per direction).
+		uint32_t timeoutMs = (currentState == STATE_WINDING) ? PULSE_TIMEOUT_WIND_MS : PULSE_TIMEOUT_UNWIND_MS;
+		unsigned long totalElapsed = (currentState == STATE_WINDING) ? accumulatedWindMs : accumulatedUnwindMs;
+		if (totalElapsed > timeoutMs) {
+			dbgPrintf("ERROR: No endstop pulses for %lu seconds\n", timeoutMs / 1000);
 			// remember which direction caused the error, block that direction on recovery
 			errorFromState = currentState;
 			if (errorFromState == STATE_WINDING) {
@@ -405,15 +520,27 @@ void loop() {
 
 	// Control SERVO1 (winding motor) - alternating subtract/add around the input
 	if (currentState == STATE_WINDING || currentState == STATE_UNWINDING) {
-		// If we're within 1 second of the pulse timeout, hold a fixed PWM
-		unsigned long warnThreshold = (PULSE_TIMEOUT_MS > 1000) ? (PULSE_TIMEOUT_MS - 1000) : 0;
-		if (now - lastLimitPulseTime >= warnThreshold && warnThreshold > 0) {
+		// If remaining timeout reached zero, force neutral immediately
+		uint32_t timeoutMs = (currentState == STATE_WINDING) ? PULSE_TIMEOUT_WIND_MS : PULSE_TIMEOUT_UNWIND_MS;
+		// Compute total elapsed toward timeout (accumulated + current segment)
+		unsigned long segElapsed = 0;
+		if (lastStateActiveTime != 0 && now >= lastStateActiveTime) segElapsed = now - lastStateActiveTime;
+		unsigned long totalElapsed = ((currentState == STATE_WINDING) ? accumulatedWindMs : accumulatedUnwindMs) + segElapsed;
+		if (totalElapsed >= timeoutMs) {
+			// timeout reached: force neutral immediately
+			setServo1NeutralSequence();
+			currentServo1Pulse = SERVO1_NEUTRAL_US;
+			lastServo1UpdateTime = now;
+		} else {
+		// warning when within 1 second of timeout
+		unsigned long warnThresholdMs = (timeoutMs > 1000) ? (timeoutMs - 1000) : 0;
+		if (totalElapsed >= warnThresholdMs && warnThresholdMs > 0) {
 			// One second before entering ERROR: set fixed output 100 µs from neutral
 			int32_t fixedPulse;
 			if (currentState == STATE_WINDING) {
-				fixedPulse = (int32_t)SERVO1_NEUTRAL_US + 100;
+				fixedPulse = (int32_t)SERVO1_NEUTRAL_US - 50;
 			} else {
-				fixedPulse = (int32_t)SERVO1_NEUTRAL_US - 100;
+				fixedPulse = (int32_t)SERVO1_NEUTRAL_US + 50;
 			}
 			if (fixedPulse < (int32_t)SERVO1_MIN_US) fixedPulse = SERVO1_MIN_US;
 			if (fixedPulse > (int32_t)SERVO1_MAX_US) fixedPulse = SERVO1_MAX_US;
@@ -424,19 +551,53 @@ void loop() {
 			lastServo1UpdateTime = now;
 			// skip further per-interval stepping while in warning window
 		} else {
-		// Calculate remaining full revolutions
+		// Calculate remaining full revolutions and per-direction proximity
 		const unsigned long absRevolutions = pulseCount / PULSES_PER_REVOLUTION;
-		const long remainingRevs = (long)MAX_REVOLUTIONS - (long)absRevolutions;
-		// If only one revolution or less remains, stop changing servo output (keep currentServo1Pulse)
-		if (remainingRevs <= 1) {
+		const long remainingToMax = (long)MAX_REVOLUTIONS - (long)absRevolutions;
+		const long remainingToZero = (long)absRevolutions;
+		// Compute remaining time for both directions (include active segment)
+		unsigned long segElapsedForHold = 0;
+		if (lastStateActiveTime != 0 && now >= lastStateActiveTime) segElapsedForHold = now - lastStateActiveTime;
+		unsigned long totalElapsedWindForHold = accumulatedWindMs + ((currentState == STATE_WINDING) ? segElapsedForHold : 0);
+		unsigned long totalElapsedUnwForHold = accumulatedUnwindMs + ((currentState == STATE_UNWINDING) ? segElapsedForHold : 0);
+		unsigned long remWindMsForHold = (totalElapsedWindForHold >= PULSE_TIMEOUT_WIND_MS) ? 0 : (PULSE_TIMEOUT_WIND_MS - totalElapsedWindForHold);
+		unsigned long remUnwMsForHold = (totalElapsedUnwForHold >= PULSE_TIMEOUT_UNWIND_MS) ? 0 : (PULSE_TIMEOUT_UNWIND_MS - totalElapsedUnwForHold);
+		// If endstop/rev counting is unavailable (timer-only), prefer timer-based blocking:
+		bool holdServo = false;
+		if (!startupSpoolAssumedFull) {
+			if (currentState == STATE_WINDING) {
+				if (remainingToMax <= 1 && remWindMsForHold == 0) holdServo = true;
+			} else if (currentState == STATE_UNWINDING) {
+				if (remainingToZero <= 1 && remUnwMsForHold == 0) holdServo = true;
+			}
+		} else {
+			// If we started assumed full, allow WINDING to move, but still prevent UNWINDING
+			if (currentState == STATE_UNWINDING) {
+				if (remainingToZero <= 1 && remUnwMsForHold == 0) holdServo = true;
+			}
+		}
+		if (holdServo) {
 			// do nothing: hold currentServo1Pulse
 		} else {
 			if (now - lastServo1UpdateTime >= SERVO1_UPDATE_INTERVAL) {
 				// Base target is the raw input clamped to servo limits
 				uint16_t base = computeServo1FromInput(lastInput1Value);
-				// If direction is blocked by limits, treat target as neutral so same-direction motion stops
-				if (base > SERVO1_NEUTRAL_US && !allowWinding) base = SERVO1_NEUTRAL_US;
-				if (base < SERVO1_NEUTRAL_US && !allowUnwinding) base = SERVO1_NEUTRAL_US;
+				// If remaining timeout for the active direction reached zero, force neutral
+				{
+					unsigned long segForBase = 0;
+					if (lastStateActiveTime != 0 && now >= lastStateActiveTime) segForBase = now - lastStateActiveTime;
+					if (currentState == STATE_WINDING) {
+						unsigned long totalElapsedWind = accumulatedWindMs + segForBase;
+						if (totalElapsedWind >= PULSE_TIMEOUT_WIND_MS) base = SERVO1_NEUTRAL_US;
+					} else if (currentState == STATE_UNWINDING) {
+						unsigned long totalElapsedUnw = accumulatedUnwindMs + segForBase;
+						if (totalElapsedUnw >= PULSE_TIMEOUT_UNWIND_MS) base = SERVO1_NEUTRAL_US;
+					}
+				}
+					// If direction is blocked by limits, treat target as neutral so same-direction motion stops
+					// NOTE: `base > NEUTRAL` corresponds to UNWINDING, `base < NEUTRAL` to WINDING.
+					if (base > SERVO1_NEUTRAL_US && !allowUnwinding) base = SERVO1_NEUTRAL_US;
+					if (base < SERVO1_NEUTRAL_US && !allowWinding) base = SERVO1_NEUTRAL_US;
 				uint16_t next = currentServo1Pulse;
 				if (base == SERVO1_NEUTRAL_US) {
 					// No motion requested
@@ -468,12 +629,16 @@ void loop() {
 					servo1PhaseSubtract = !servo1PhaseSubtract;
 				}
 				servo1.writeMicroseconds(next);
+				if (next == SERVO1_NEUTRAL_US) {
+					setServo1NeutralSequence();
+				}
 				currentServo1Pulse = next;
 				lastServo1UpdateTime = now;
+				}
 			}
-		}
-		}
-	} else if (currentState == STATE_ERROR) {
+			}
+			}
+		} else if (currentState == STATE_ERROR) {
 		// Hold physical servo at neutral while in error and wait for input to return to neutral
 		setServo1NeutralSequence();
 		// If input1 is back to neutral, clear ERROR to IDLE but keep the original direction blocked
@@ -527,24 +692,25 @@ void loop() {
 	if (now - lastPrint > 500) {
 		// Compute full revolutions (based on pulseCount)
 		unsigned long revolutions = pulseCount / PULSES_PER_REVOLUTION;
-		// Compute remaining time until timeout (in seconds) only when winding/unwinding
-		unsigned long remainingSec = 0;
-		if (currentState == STATE_WINDING || currentState == STATE_UNWINDING) {
-			long remainingMs = 0;
-			if (now >= lastLimitPulseTime) {
-				long elapsed = (long)(now - lastLimitPulseTime);
-				long rem = (long)PULSE_TIMEOUT_MS - elapsed;
-				if (rem < 0) rem = 0;
-				remainingMs = rem;
-			}
-			remainingSec = (unsigned long)((remainingMs + 500) / 1000); // round to nearest second
+		// Compute remaining time until timeout (in seconds) for both winding and unwinding
+		unsigned long remainingWindSec = 0;
+		unsigned long remainingUnwindSec = 0;
+		{
+			unsigned long segWind = 0;
+			unsigned long segUnw = 0;
+			if (currentState == STATE_WINDING && lastStateActiveTime != 0 && now >= lastStateActiveTime) segWind = now - lastStateActiveTime;
+			if (currentState == STATE_UNWINDING && lastStateActiveTime != 0 && now >= lastStateActiveTime) segUnw = now - lastStateActiveTime;
+			unsigned long totalElapsedWind = accumulatedWindMs + segWind;
+			unsigned long totalElapsedUnwind = accumulatedUnwindMs + segUnw;
+			unsigned long remWindMs = (totalElapsedWind >= PULSE_TIMEOUT_WIND_MS) ? 0 : (PULSE_TIMEOUT_WIND_MS - totalElapsedWind);
+			unsigned long remUnwMs = (totalElapsedUnwind >= PULSE_TIMEOUT_UNWIND_MS) ? 0 : (PULSE_TIMEOUT_UNWIND_MS - totalElapsedUnwind);
+			remainingWindSec = (remWindMs + 500) / 1000;
+			remainingUnwindSec = (remUnwMs + 500) / 1000;
 		}
-		dbgPrintf("State:%d Input1:%uus Input2:%luus Rev:%lurevs (%lupulses) Endstop:%lu S1:%uus S2:%uus Remain:%lus\n",
-				  currentState, lastInput1Value, pulse2, revolutions, pulseCount, endstopPulseCount, currentServo1Pulse, currentServo2Pulse, remainingSec);
+		dbgPrintf("State:%d Input1:%uus Input2:%luus Rev:%lurevs (%lupulses) Endstop:%lu S1:%uus S2:%uus RemW:%lus RemU:%lus\n",
+				  currentState, lastInput1Value, pulse2, revolutions, pulseCount, endstopPulseCount, currentServo1Pulse, currentServo2Pulse, remainingWindSec, remainingUnwindSec);
 		lastPrint = now;
 	}
-
-	
 }
 
 
