@@ -31,7 +31,7 @@ static const uint16_t SERVO2_OPEN_US = 2000;     // Gate open position
 static const uint16_t INPUT_DEADZONE = 30;        // Deadzone around neutral (±30 µs)
 static const uint16_t INPUT_NEUTRAL = 1500;       // Neutral position
 // Timeouts for endstop pulse absence (per direction)
-static const uint32_t PULSE_TIMEOUT_WIND_MS = 93000;   // 90 seconds without pulses = error (winding)
+static const uint32_t PULSE_TIMEOUT_WIND_MS = 98000;   // 90 seconds without pulses = error (winding)
 static const uint32_t PULSE_TIMEOUT_UNWIND_MS = 80000; // 80 seconds without pulses = error (unwinding)
 static const uint32_t SERVO1_UPDATE_INTERVAL = 30; // Update servo1 every 500ms ±30ms
 static const int PULSES_PER_REVOLUTION = 4;       // 4 endstop pulses = 1 revolution
