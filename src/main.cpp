@@ -55,9 +55,9 @@ static const float STEPS_PER_OUTPUT_REV = (float)STEPS_PER_REV * STEPPER_GEAR_RA
 // User-configurable servo positions (loaded from non-volatile memory at startup)
 uint16_t servo2ClosedPos = 1100;   // Gate closed position (default, will be overridden)
 uint16_t servo2OpenPos = 1900;     // Gate open position (default, will be overridden)
-// Minimum difference between open/closed positions to ensure meaningful servo movement
-// 50µs provides reliable operation for most servo models while allowing flexibility
-static const uint16_t MIN_SERVO_DIFF = 50; // Minimum difference between open/closed positions (µs)
+// Minimum difference between open/closed positions: 50µs provides reliable operation
+// for most servo models while allowing flexibility in position values
+static const uint16_t MIN_SERVO_DIFF = 50;
 
 // Control parameters
 static const uint16_t INPUT_DEADZONE = 30;        // Deadzone around neutral (±30 µs)
@@ -754,7 +754,7 @@ void handleSettings() {
 				changed = true;
 			} else {
 				// Invalid: positions are too close
-				message = "Error: Open and Closed positions must differ by at least " + String(MIN_SERVO_DIFF) + " μs";
+				message = "Error: Open and Closed positions must differ by at least " + String(MIN_SERVO_DIFF) + " µs";
 				servo2Changed = false;
 			}
 		}
