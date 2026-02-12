@@ -21,8 +21,8 @@ static const uint16_t SERVO1_MAX_US = 2500;
 static const uint16_t SERVO1_NEUTRAL_US = 1500;
 
 // Servo 2 (gate) pulse bounds in microseconds
-static const uint16_t SERVO2_MIN_US = 1100;
-static const uint16_t SERVO2_MAX_US = 1900;
+static const uint16_t SERVO2_MIN_US = 500;
+static const uint16_t SERVO2_MAX_US = 2500;
 static const uint16_t SERVO2_NEUTRAL_US = 1540;
 static const uint16_t SERVO2_CLOSED_US = 1200;   // Gate closed position
 static const uint16_t SERVO2_OPEN_US = 2000;     // Gate open position
