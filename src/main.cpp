@@ -712,19 +712,43 @@ void handleSettings() {
 		bool changed = false;
 		String message = "Settings updated";
 
+		// Temporary variables to hold new values for validation
+		uint16_t newServo2Open = servo2OpenPos;
+		uint16_t newServo2Closed = servo2ClosedPos;
+		bool servo2Changed = false;
+
 		if (server.hasArg("servo2Open")) {
 			uint16_t val = server.arg("servo2Open").toInt();
 			if (val >= 500 && val <= 2500) {
-				servo2OpenPos = val;
-				changed = true;
+				newServo2Open = val;
+				servo2Changed = true;
 			}
 		}
 
 		if (server.hasArg("servo2Closed")) {
 			uint16_t val = server.arg("servo2Closed").toInt();
 			if (val >= 500 && val <= 2500) {
-				servo2ClosedPos = val;
+				newServo2Closed = val;
+				servo2Changed = true;
+			}
+		}
+
+		// Validate that open and closed positions are sufficiently different
+		if (servo2Changed) {
+			const uint16_t MIN_SERVO_DIFF = 50; // Minimum difference in microseconds
+			uint16_t diff = (newServo2Open > newServo2Closed) 
+				? (newServo2Open - newServo2Closed) 
+				: (newServo2Closed - newServo2Open);
+			
+			if (diff >= MIN_SERVO_DIFF) {
+				// Valid: positions are sufficiently different
+				servo2OpenPos = newServo2Open;
+				servo2ClosedPos = newServo2Closed;
 				changed = true;
+			} else {
+				// Invalid: positions are too close
+				message = "Error: Open and Closed positions must differ by at least " + String(MIN_SERVO_DIFF) + " μs";
+				servo2Changed = false;
 			}
 		}
 
