@@ -206,6 +206,7 @@
                 "C:/Users/Admin/.platformio/packages/framework-arduinoespressif32@3.20016.0/tools/sdk/esp32/dio_qspi/include",
                 "C:/Users/Admin/.platformio/packages/framework-arduinoespressif32@3.20016.0/cores/esp32",
                 "C:/Users/Admin/.platformio/packages/framework-arduinoespressif32@3.20016.0/variants/esp32",
+                "C:/#Data/WireWinder/.pio/libdeps/esp32dev/FastAccelStepper/src",
                 "C:/Users/Admin/.platformio/packages/framework-arduinoespressif32@3.20016.0/libraries/ArduinoOTA/src",
                 "C:/Users/Admin/.platformio/packages/framework-arduinoespressif32@3.20016.0/libraries/AsyncUDP/src",
                 "C:/Users/Admin/.platformio/packages/framework-arduinoespressif32@3.20016.0/libraries/BLE/src",
@@ -442,6 +443,7 @@
                     "C:/Users/Admin/.platformio/packages/framework-arduinoespressif32@3.20016.0/tools/sdk/esp32/dio_qspi/include",
                     "C:/Users/Admin/.platformio/packages/framework-arduinoespressif32@3.20016.0/cores/esp32",
                     "C:/Users/Admin/.platformio/packages/framework-arduinoespressif32@3.20016.0/variants/esp32",
+                    "C:/#Data/WireWinder/.pio/libdeps/esp32dev/FastAccelStepper/src",
                     "C:/Users/Admin/.platformio/packages/framework-arduinoespressif32@3.20016.0/libraries/ArduinoOTA/src",
                     "C:/Users/Admin/.platformio/packages/framework-arduinoespressif32@3.20016.0/libraries/AsyncUDP/src",
                     "C:/Users/Admin/.platformio/packages/framework-arduinoespressif32@3.20016.0/libraries/BLE/src",
@@ -479,7 +481,7 @@
                 ]
             },
             "defines": [
-                "PLATFORMIO=60118",
+                "PLATFORMIO=60119",
                 "ARDUINO_ESP32_DEV",
                 "HAVE_CONFIG_H",
                 "MBEDTLS_CONFIG_FILE=\"mbedtls/esp_config.h\"",
