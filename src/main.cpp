@@ -799,17 +799,21 @@ void setup() {
 		stepper->setEnablePin(PIN_EN, true); // TMC2209 EN is active LOW
 		stepper->setAutoEnable(true);
 		stepper->setAcceleration(STEPPER_ACCEL);
+		// Explicitly disable stepper at startup to ensure no movement
+		stepper->forceStopAndNewPosition(0);
 	}
 
 	// TMC2209 in standalone mode - no UART configuration needed
 	// Configuration done via hardware: Vref resistor sets current, MS pins set microstepping
 	dbgPrintf("TMC2209 in standalone mode (no UART): %d microsteps expected\n", STEPPER_MICROSTEPS);
+	dbgPrintln("Stepper motor initialized: STOPPED and DISABLED at startup");
 
 	// Attach servo2 with wide pulse range (500-2500 µs)
 	servo2.attach(PIN_SERVO2, 500, 2500);
 
 	servo2.writeMicroseconds(servo2ClosedPos);
 	currentServo2Pulse = servo2ClosedPos;
+	dbgPrintf("Servo initialized to closed position: %u µs\n", servo2ClosedPos);
 
 	// Initialize revolution counter at maxRevolutions (fully wound)
 	revolutionCounter = maxRevolutions;
