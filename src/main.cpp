@@ -55,6 +55,7 @@ static const float STEPS_PER_OUTPUT_REV = (float)STEPS_PER_REV * STEPPER_GEAR_RA
 // User-configurable servo positions (loaded from non-volatile memory at startup)
 uint16_t servo2ClosedPos = 1100;   // Gate closed position (default, will be overridden)
 uint16_t servo2OpenPos = 1900;     // Gate open position (default, will be overridden)
+static const uint16_t MIN_SERVO_DIFF = 50; // Minimum difference between open/closed positions (µs)
 
 // Control parameters
 static const uint16_t INPUT_DEADZONE = 30;        // Deadzone around neutral (±30 µs)
@@ -735,7 +736,6 @@ void handleSettings() {
 
 		// Validate that open and closed positions are sufficiently different
 		if (servo2Changed) {
-			const uint16_t MIN_SERVO_DIFF = 50; // Minimum difference in microseconds
 			uint16_t diff = (newServo2Open > newServo2Closed) 
 				? (newServo2Open - newServo2Closed) 
 				: (newServo2Closed - newServo2Open);
@@ -791,6 +791,22 @@ void setup() {
 	servo2ClosedPos = preferences.getUShort("servo2Closed", 1100); // default 1100
 	maxRevolutions = preferences.getFloat("maxRevs", 3.0f); // default 3.0
 	preferences.end();
+	
+	// Validate loaded servo positions - ensure they're sufficiently different
+	uint16_t diff = (servo2OpenPos > servo2ClosedPos) 
+		? (servo2OpenPos - servo2ClosedPos) 
+		: (servo2ClosedPos - servo2OpenPos);
+	if (diff < MIN_SERVO_DIFF) {
+		dbgPrintf("WARNING: Loaded servo positions too close (%u µs apart), resetting to defaults\n", diff);
+		servo2OpenPos = 1900;
+		servo2ClosedPos = 1100;
+		// Save corrected values
+		preferences.begin("wirewinder", false);
+		preferences.putUShort("servo2Open", servo2OpenPos);
+		preferences.putUShort("servo2Closed", servo2ClosedPos);
+		preferences.end();
+	}
+	
 	dbgPrintf("Loaded settings: servo2Open=%u servo2Closed=%u maxRevs=%.1f\n",
 	          servo2OpenPos, servo2ClosedPos, maxRevolutions);
 
