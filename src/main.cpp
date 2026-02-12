@@ -55,6 +55,8 @@ static const float STEPS_PER_OUTPUT_REV = (float)STEPS_PER_REV * STEPPER_GEAR_RA
 // User-configurable servo positions (loaded from non-volatile memory at startup)
 uint16_t servo2ClosedPos = 1100;   // Gate closed position (default, will be overridden)
 uint16_t servo2OpenPos = 1900;     // Gate open position (default, will be overridden)
+// Minimum difference between open/closed positions to ensure meaningful servo movement
+// 50µs provides reliable operation for most servo models while allowing flexibility
 static const uint16_t MIN_SERVO_DIFF = 50; // Minimum difference between open/closed positions (µs)
 
 // Control parameters
@@ -362,6 +364,7 @@ void handleRoot() {
 		const stateNames = ['IDLE', 'WINDING', 'UNWINDING', 'ERROR'];
 		const stateClasses = ['state-idle', 'state-winding', 'state-unwinding', 'state-error'];
 		let activeCommand = null; // Track active command for heartbeat
+		let minServoDiff = 50; // Default, will be updated from backend
 
 		function loadSettings() {
 			fetch('/settings')
@@ -373,6 +376,9 @@ void handleRoot() {
 					document.getElementById('maxRevs-display').textContent = data.maxRevolutions;
 					if (data.maxMotorRevolutions !== undefined) {
 						document.getElementById('maxRevs-motor').textContent = data.maxMotorRevolutions;
+					}
+					if (data.minServoDiff !== undefined) {
+						minServoDiff = data.minServoDiff;
 					}
 				})
 				.catch(error => console.error('Failed to load settings:', error));
@@ -421,8 +427,8 @@ void handleRoot() {
 			const closedPos = parseInt(document.getElementById('servo2Closed').value);
 			const openPos = parseInt(document.getElementById('servo2Open').value);
 
-			// Determine if gate is currently closed (within 50us of closed position)
-			const isClosed = Math.abs(currentPos - closedPos) < 50;
+			// Determine if gate is currently closed (within minServoDiff of closed position)
+			const isClosed = Math.abs(currentPos - closedPos) < minServoDiff;
 
 			if (isClosed) {
 				sendCommand('open');
@@ -512,7 +518,7 @@ void handleRoot() {
 					// Update gate toggle button text based on current position
 					const gateToggle = document.getElementById('gateToggle');
 					const closedPos = parseInt(document.getElementById('servo2Closed').value);
-					const isClosed = Math.abs(data.servo2 - closedPos) < 50;
+					const isClosed = Math.abs(data.servo2 - closedPos) < minServoDiff;
 					if (isClosed) {
 						gateToggle.innerHTML = '🔓 Open Gate';
 						gateToggle.style.background = '#2196F3';
@@ -703,6 +709,7 @@ void handleSettings() {
 		String json = "{";
 		json += "\"servo2Open\":" + String(servo2OpenPos) + ",";
 		json += "\"servo2Closed\":" + String(servo2ClosedPos) + ",";
+		json += "\"minServoDiff\":" + String(MIN_SERVO_DIFF) + ",";
 		json += "\"maxRevolutions\":" + String(maxRevolutions, 2) + ",";
 		json += "\"maxMotorRevolutions\":" + String(maxRevolutions * STEPPER_GEAR_RATIO, 2) + ",";
 		json += "\"gearRatio\":" + String(STEPPER_GEAR_RATIO, 2);
