@@ -59,6 +59,9 @@ uint16_t servo2OpenPos = 1900;     // Gate open position (default, will be overr
 // Control parameters
 static const uint16_t INPUT_DEADZONE = 30;        // Deadzone around neutral (±30 µs)
 static const uint16_t INPUT_NEUTRAL = 1500;       // Neutral position
+// Web-only gate command pulses (independent of servo2 open/closed positions)
+static const uint16_t WEB_GATE_OPEN_CMD = INPUT_NEUTRAL + INPUT_DEADZONE + 50;
+static const uint16_t WEB_GATE_CLOSE_CMD = INPUT_NEUTRAL - INPUT_DEADZONE - 50;
 // Timeouts per direction
 static const uint32_t PULSE_TIMEOUT_WIND_MS = 98000;   // 98 seconds timeout (winding)
 static const uint32_t PULSE_TIMEOUT_UNWIND_MS = 80000; // 80 seconds timeout (unwinding)
@@ -158,7 +161,7 @@ static inline int32_t computeStepperSpeedFromInput(uint16_t input) {
 	return (input > INPUT_NEUTRAL) ? (int32_t)STEPPER_MAX_SPEED : -(int32_t)STEPPER_MAX_SPEED;
 }
 
-// Enable/disable stepper motor
+// Enable/disable stepper motor outputs
 static void setStepperEnable(bool enable) {
 	if (!stepper) {
 		stepperEnabled = false;
@@ -167,11 +170,25 @@ static void setStepperEnable(bool enable) {
 	}
 
 	if (enable) {
+		stepper->enableOutputs();
 		stepperEnabled = true;
 		return;
 	}
 
 	stepper->stopMove();
+	stepperEnabled = false;
+	currentStepperSpeed = 0;
+}
+
+// Stop motion but keep holding torque
+static void setStepperHold() {
+	if (!stepper) {
+		stepperEnabled = false;
+		currentStepperSpeed = 0;
+		return;
+	}
+	stepper->stopMove();
+	stepper->enableOutputs();
 	stepperEnabled = false;
 	currentStepperSpeed = 0;
 }
@@ -183,7 +200,7 @@ static void updateStepperSpeed(int32_t targetSpeed) {
 	}
 
 	if (targetSpeed == 0) {
-		setStepperEnable(false);
+		setStepperHold();
 		return;
 	}
 
@@ -653,14 +670,14 @@ void handleCommand() {
 		// Open gate (input2 above neutral)
 		controlMode = CONTROL_WEB;
 		webCommandInput1 = INPUT_NEUTRAL; // Stop motor
-		webCommandInput2 = servo2OpenPos;
+		webCommandInput2 = WEB_GATE_OPEN_CMD;
 		lastWebCommandTime = millis();
 		message = "Gate opening";
 	} else if (cmd == "close") {
 		// Close gate (input2 below neutral)
 		controlMode = CONTROL_WEB;
 		webCommandInput1 = INPUT_NEUTRAL; // Stop motor
-		webCommandInput2 = servo2ClosedPos;
+		webCommandInput2 = WEB_GATE_CLOSE_CMD;
 		lastWebCommandTime = millis();
 		message = "Gate closing";
 	} else if (cmd == "pwm_mode") {
@@ -797,7 +814,7 @@ void setup() {
 	} else {
 		stepper->setDirectionPin(PIN_DIR);
 		stepper->setEnablePin(PIN_EN, true); // TMC2209 EN is active LOW
-		stepper->setAutoEnable(true);
+		stepper->setAutoEnable(false);
 		stepper->setAcceleration(STEPPER_ACCEL);
 		// Explicitly disable stepper at startup to ensure no movement
 		// Position is set to 0 (arbitrary) - actual position tracking uses revolutionCounter
@@ -807,7 +824,8 @@ void setup() {
 	// TMC2209 in standalone mode - no UART configuration needed
 	// Configuration done via hardware: Vref resistor sets current, MS pins set microstepping
 	dbgPrintf("TMC2209 in standalone mode (no UART): %d microsteps expected\n", STEPPER_MICROSTEPS);
-	dbgPrintln("Stepper motor initialized: STOPPED and DISABLED at startup");
+	setStepperHold();
+	dbgPrintln("Stepper motor initialized: STOPPED with HOLD enabled at startup");
 
 	// Attach servo2 with wide pulse range (500-2500 µs)
 	servo2.attach(PIN_SERVO2, 500, 2500);
@@ -921,8 +939,8 @@ void loop() {
 			dbgPrintf("ARM WAIT DIAG: pulse1:%uus pulse2:%uus seenMax:%d\n", pulse1, pulse2, seenArmMax ? 1 : 0);
 			lastArmDiag = now;
 		}
-		// while waiting, hold stepper disabled and servo safe and ignore other inputs
-		setStepperEnable(false);
+		// while waiting, hold stepper with torque and servo safe and ignore other inputs
+		setStepperHold();
 		servo2.writeMicroseconds(servo2ClosedPos);
 		currentServo2Pulse = servo2ClosedPos;
 		// skip normal control until armed
@@ -988,6 +1006,13 @@ void loop() {
 						dbgPrintln("Transition to WINDING blocked (direction not allowed)");
 					// ignore transition
 				} else {
+					// If starting WINDING from IDLE at zero, reset timers for a full run
+					if (currentState == STATE_IDLE && revolutionCounter <= 0.01f) {
+						accumulatedWindMs = 0;
+						accumulatedUnwindMs = PULSE_TIMEOUT_UNWIND_MS;
+						initialTimersInitialized = true;
+						dbgPrintf("START: WIND (reset at 0) accumWind:%lums accumUnw:%lums\n", accumulatedWindMs, accumulatedUnwindMs);
+					}
 					// If starting WINDING from IDLE (cold start), initialize timers
 					if (!initialTimersInitialized) {
 						accumulatedWindMs = 0;
@@ -1035,6 +1060,13 @@ void loop() {
 						dbgPrintln("Transition to UNWINDING blocked (direction not allowed)");
 					// ignore transition
 				} else {
+					// If starting UNWINDING from IDLE at max, reset timers for a full run
+					if (currentState == STATE_IDLE && revolutionCounter >= (maxRevolutions - 0.01f)) {
+						accumulatedUnwindMs = 0;
+						accumulatedWindMs = PULSE_TIMEOUT_WIND_MS;
+						initialTimersInitialized = true;
+						dbgPrintf("START: UNW (reset at max) accumUnw:%lums accumWind:%lums\n", accumulatedUnwindMs, accumulatedWindMs);
+					}
 					// If starting UNWINDING from IDLE (cold start), initialize timers
 					if (!initialTimersInitialized) {
 						accumulatedUnwindMs = 0;
@@ -1204,8 +1236,8 @@ void loop() {
 			lastStepperUpdateTime = now;
 		}
 	} else if (currentState == STATE_ERROR || currentState == STATE_IDLE) {
-		// Stop motor in error or idle state
-		setStepperEnable(false);
+		// Stop motor but keep holding torque in error or idle state
+		setStepperHold();
 	}
 
 	// Track INPUT2 and control SERVO2 only when deviating from neutral (deadzone)
