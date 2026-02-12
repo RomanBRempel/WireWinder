@@ -800,6 +800,7 @@ void setup() {
 		stepper->setAutoEnable(true);
 		stepper->setAcceleration(STEPPER_ACCEL);
 		// Explicitly disable stepper at startup to ensure no movement
+		// Position is set to 0 (arbitrary) - actual position tracking uses revolutionCounter
 		stepper->forceStopAndNewPosition(0);
 	}
 
@@ -816,6 +817,8 @@ void setup() {
 	dbgPrintf("Servo initialized to closed position: %u µs\n", servo2ClosedPos);
 
 	// Initialize revolution counter at maxRevolutions (fully wound)
+	// NOTE: This assumes the physical system starts in a fully wound state
+	// The operator must ensure the system is fully wound before powering on
 	revolutionCounter = maxRevolutions;
 	dbgPrintf("Revolution counter initialized at %.2f (fully wound, available for unwinding)\n", revolutionCounter);
 
