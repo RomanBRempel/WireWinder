@@ -8,7 +8,7 @@
 #include <HTTPClient.h>
 #include <Update.h>
 
-#define FIRMWARE_VERSION "1.0.2"
+#define FIRMWARE_VERSION "1.0.4"
 #define FIRMWARE_UPDATE_CHECK_INTERVAL 3600000  // Check every 1 hour (in ms)
 
 // WiFi credentials (will be loaded from preferences)
@@ -621,11 +621,11 @@ void handleRoot() {
 	<style>
 		body { font-family: Arial, sans-serif; margin: 20px; background: #1a1a1a; color: #e0e0e0; }
 		h1 { color: #4CAF50; }
-		.status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 15px; }
-		.status-card { background: #2a2a2a; padding: 15px; border-radius: 8px; border-left: 4px solid #4CAF50; }
-		.status-card h3 { margin-top: 0; color: #4CAF50; }
-		.status-value { font-size: 1.5em; font-weight: bold; color: #fff; }
-		.status-label { color: #aaa; font-size: 0.9em; margin-top: 5px; }
+		.status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; align-items: stretch; }
+		.status-card { background: #2a2a2a; padding: 12px; border-radius: 8px; border-left: 4px solid #4CAF50; min-width: 0; }
+		.status-card h3 { margin: 0 0 8px 0; color: #4CAF50; font-size: 1em; }
+		.status-value { font-size: 1.2em; font-weight: bold; color: #fff; }
+		.status-label { color: #aaa; font-size: 0.82em; margin-top: 5px; }
 		.state-idle { border-left-color: #2196F3; }
 		.state-winding { border-left-color: #FF9800; }
 		.state-unwinding { border-left-color: #9C27B0; }
@@ -654,6 +654,26 @@ void handleRoot() {
 		.pwm-map { margin-top: 8px; color: #bbb; font-size: 0.9em; }
 		.ap-seq { border-left-color: #FFC107; }
 		.ap-seq-confirmed { border-left-color: #4CAF50; }
+
+		/* Keep status cards in a single row on wide screens, reduce columns as width shrinks */
+		@media (min-width: 1800px) {
+			#status-panel .status-grid { grid-template-columns: repeat(7, minmax(0, 1fr)); }
+		}
+		@media (min-width: 1500px) and (max-width: 1799px) {
+			#status-panel .status-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+		}
+		@media (min-width: 1200px) and (max-width: 1499px) {
+			#status-panel .status-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+		}
+		@media (min-width: 900px) and (max-width: 1199px) {
+			#status-panel .status-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+		}
+		@media (max-width: 899px) {
+			#status-panel .status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+		}
+		@media (max-width: 640px) {
+			#status-panel .status-grid { grid-template-columns: 1fr; }
+		}
 	</style>
 </head>
 <body>
