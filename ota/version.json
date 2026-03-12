@@ -1,0 +1,5 @@
+{
+  "version": "1.0.0",
+  "bin": "wirewinder.bin",
+  "notes": "Initial GitHub OTA manifest"
+}
