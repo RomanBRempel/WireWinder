@@ -1,5 +1,6 @@
 {
-  "version": "1.0.0",
+  "version": "1.0.1",
   "bin": "wirewinder.bin",
-  "notes": "Initial GitHub OTA manifest"
+  "notes": "Published current build from main (OTA release 1.0.1)",
+  "publishedAt": "2026-03-12"
 }
