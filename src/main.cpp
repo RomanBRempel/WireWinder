@@ -689,6 +689,91 @@ void handleRoot() {
 			<button class="btn btn-stop" onclick="sendCommand('stop')">⏹️ Stop</button>
 			<button class="btn btn-unwind" onclick="sendCommand('unwind')">⬇️ Unwind</button>
 		</div>
+
+		<div class="status-grid">
+			<div class="status-card" id="state-card">
+				<h3>System State</h3>
+				<div class="status-value" id="state">--</div>
+				<div class="status-label">Current Operation</div>
+				<div id="errorInfo" style="display: none; margin-top: 10px; color: #f44336; font-weight: bold;"></div>
+			</div>
+			<div class="status-card" id="arm-card">
+				<h3>ARM Status</h3>
+				<div class="status-value" id="armStatus">--</div>
+				<div class="status-label">System Armed</div>
+				<div style="margin-top: 15px;">
+					<button class="btn" onclick="sendCommand('arm')" style="width: 100%; background: #4CAF50;">✓ ARM System</button>
+				</div>
+			</div>
+			<div class="status-card ap-seq" id="ap-seq-card">
+				<h3>AP Activation</h3>
+				<div class="status-value" id="apSeqSource">NONE</div>
+				<div class="status-label">Detected Input Source</div>
+				<div class="status-value" id="apSeqProgress" style="margin-top: 10px;">0/3</div>
+				<div class="status-label">Captured Max-Min Cycles</div>
+				<div class="status-label" id="apSeqCmd" style="margin-top: 10px;">Last command: --</div>
+				<div style="font-size: 0.9em; color: #ddd; margin-top: 8px;" id="apSeqStatus">Status: Idle</div>
+			</div>
+			<div class="status-card">
+				<h3>Input Channels</h3>
+				<div class="status-value" id="input1">-- μs</div>
+				<div class="status-label">Channel 1 (Motor, GPIO16 - Filtered)</div>
+				<div style="font-size: 0.9em; color: #888; margin-top: 5px;" id="rawInput1">Raw: -- μs</div>
+				<div class="status-value" id="input2" style="margin-top: 10px;">-- μs</div>
+				<div class="status-label">Channel 2 (Gate, GPIO17 - Filtered)</div>
+				<div style="font-size: 0.9em; color: #888; margin-top: 5px;" id="rawInput2">Raw: -- μs</div>
+			</div>
+			<div class="status-card">
+				<h3>Stepper Motor</h3>
+				<div class="status-value" id="stepSpeed">0 steps/s</div>
+				<div class="status-label">Current Speed</div>
+				<div class="status-value" id="stepDir">--</div>
+				<div class="status-label">Direction</div>
+			</div>
+			<div class="status-card">
+				<h3>Revolution Counter</h3>
+				<div class="status-value" id="revolutions">0.00</div>
+				<div class="status-label">Output Rev (Current)</div>
+				<div class="status-value" id="motorRevolutions" style="margin-top: 10px;">0.00</div>
+				<div class="status-label">Motor Rev (Current)</div>
+				<div class="status-label" style="margin-top: 10px;">Output Max: <span id="maxRevs-display">3.0</span></div>
+				<div class="status-label">Motor Max: <span id="maxRevs-motor">81.3</span></div>
+				<div style="margin-top: 15px;">
+					<label style="color: #aaa; font-size: 0.85em;">Max Output Revolutions:</label>
+					<input type="number" id="maxRevs" value="3.0" min="0.1" max="100" step="0.1"
+						style="width: 100%; padding: 5px; background: #333; color: #fff; border: 1px solid #555; border-radius: 3px;"
+						onblur="saveMaxRevs()" onkeypress="if(event.key==='Enter') saveMaxRevs()">
+				</div>
+				<div style="margin-top: 10px;">
+					<label style="color: #aaa; font-size: 0.85em;">Gear Ratio (Motor:Output):</label>
+					<input type="number" id="gearRatio" value="25.0" min="1" max="100" step="0.1"
+						style="width: 100%; padding: 5px; background: #333; color: #fff; border: 1px solid #555; border-radius: 3px;"
+						onblur="saveGearRatio()" onkeypress="if(event.key==='Enter') saveGearRatio()">
+				</div>
+			</div>
+			<div class="status-card">
+				<h3>Gate Servo</h3>
+				<div class="status-value" id="gateStatus">--</div>
+				<div class="status-label">Gate Status</div>
+				<div class="status-value" id="servo2">-- μs</div>
+				<div class="status-label">Current Position</div>
+				<div style="margin-top: 15px;">
+					<button class="btn" id="gateToggle" onclick="toggleGate()" style="width: 100%; background: #2196F3;">🔓 Open Gate</button>
+				</div>
+				<div style="margin-top: 10px;">
+					<label style="color: #aaa; font-size: 0.85em;">Open (μs):</label>
+					<input type="number" id="servo2Open" value="1900" min="500" max="2500"
+						style="width: 100%; padding: 5px; background: #333; color: #fff; border: 1px solid #555; border-radius: 3px;"
+						onblur="saveServoSetting('servo2Open')" onkeypress="if(event.key==='Enter') saveServoSetting('servo2Open')">
+				</div>
+				<div style="margin-top: 5px;">
+					<label style="color: #aaa; font-size: 0.85em;">Closed (μs):</label>
+					<input type="number" id="servo2Closed" value="1100" min="500" max="2500"
+						style="width: 100%; padding: 5px; background: #333; color: #fff; border: 1px solid #555; border-radius: 3px;"
+						onblur="saveServoSetting('servo2Closed')" onkeypress="if(event.key==='Enter') saveServoSetting('servo2Closed')">
+				</div>
+			</div>
+		</div>
 		<h3 style="color: #aaa;">Test Mode (No Limits)</h3>
 		<div class="button-grid">
 			<button class="btn" onclick="sendCommand('test_wind')" style="background: #FFA726;">🔧 Test Wind</button>
@@ -741,90 +826,6 @@ void handleRoot() {
 		</div>
 	</div>
 
-	<div class="status-grid">
-		<div class="status-card" id="state-card">
-			<h3>System State</h3>
-			<div class="status-value" id="state">--</div>
-			<div class="status-label">Current Operation</div>
-			<div id="errorInfo" style="display: none; margin-top: 10px; color: #f44336; font-weight: bold;"></div>
-		</div>
-		<div class="status-card" id="arm-card">
-			<h3>ARM Status</h3>
-			<div class="status-value" id="armStatus">--</div>
-			<div class="status-label">System Armed</div>
-			<div style="margin-top: 15px;">
-				<button class="btn" onclick="sendCommand('arm')" style="width: 100%; background: #4CAF50;">✓ ARM System</button>
-			</div>
-		</div>
-		<div class="status-card ap-seq" id="ap-seq-card">
-			<h3>AP Activation</h3>
-			<div class="status-value" id="apSeqSource">NONE</div>
-			<div class="status-label">Detected Input Source</div>
-			<div class="status-value" id="apSeqProgress" style="margin-top: 10px;">0/3</div>
-			<div class="status-label">Captured Max-Min Cycles</div>
-			<div class="status-label" id="apSeqCmd" style="margin-top: 10px;">Last command: --</div>
-			<div style="font-size: 0.9em; color: #ddd; margin-top: 8px;" id="apSeqStatus">Status: Idle</div>
-		</div>
-		<div class="status-card">
-			<h3>Input Channels</h3>
-			<div class="status-value" id="input1">-- μs</div>
-			<div class="status-label">Channel 1 (Motor, GPIO16 - Filtered)</div>
-			<div style="font-size: 0.9em; color: #888; margin-top: 5px;" id="rawInput1">Raw: -- μs</div>
-			<div class="status-value" id="input2" style="margin-top: 10px;">-- μs</div>
-			<div class="status-label">Channel 2 (Gate, GPIO17 - Filtered)</div>
-			<div style="font-size: 0.9em; color: #888; margin-top: 5px;" id="rawInput2">Raw: -- μs</div>
-		</div>
-		<div class="status-card">
-			<h3>Stepper Motor</h3>
-			<div class="status-value" id="stepSpeed">0 steps/s</div>
-			<div class="status-label">Current Speed</div>
-			<div class="status-value" id="stepDir">--</div>
-			<div class="status-label">Direction</div>
-		</div>
-		<div class="status-card">
-			<h3>Revolution Counter</h3>
-			<div class="status-value" id="revolutions">0.00</div>
-			<div class="status-label">Output Rev (Current)</div>
-			<div class="status-value" id="motorRevolutions" style="margin-top: 10px;">0.00</div>
-			<div class="status-label">Motor Rev (Current)</div>
-			<div class="status-label" style="margin-top: 10px;">Output Max: <span id="maxRevs-display">3.0</span></div>
-			<div class="status-label">Motor Max: <span id="maxRevs-motor">81.3</span></div>
-			<div style="margin-top: 15px;">
-				<label style="color: #aaa; font-size: 0.85em;">Max Output Revolutions:</label>
-				<input type="number" id="maxRevs" value="3.0" min="0.1" max="100" step="0.1"
-					style="width: 100%; padding: 5px; background: #333; color: #fff; border: 1px solid #555; border-radius: 3px;"
-					onblur="saveMaxRevs()" onkeypress="if(event.key==='Enter') saveMaxRevs()">
-			</div>
-			<div style="margin-top: 10px;">
-				<label style="color: #aaa; font-size: 0.85em;">Gear Ratio (Motor:Output):</label>
-				<input type="number" id="gearRatio" value="25.0" min="1" max="100" step="0.1"
-					style="width: 100%; padding: 5px; background: #333; color: #fff; border: 1px solid #555; border-radius: 3px;"
-					onblur="saveGearRatio()" onkeypress="if(event.key==='Enter') saveGearRatio()">
-			</div>
-		</div>
-		<div class="status-card">
-			<h3>Gate Servo</h3>
-			<div class="status-value" id="gateStatus">--</div>
-			<div class="status-label">Gate Status</div>
-			<div class="status-value" id="servo2">-- μs</div>
-			<div class="status-label">Current Position</div>
-			<div style="margin-top: 15px;">
-				<button class="btn" id="gateToggle" onclick="toggleGate()" style="width: 100%; background: #2196F3;">🔓 Open Gate</button>
-			</div>
-			<div style="margin-top: 10px;">
-				<label style="color: #aaa; font-size: 0.85em;">Open (μs):</label>
-				<input type="number" id="servo2Open" value="1900" min="500" max="2500"
-					style="width: 100%; padding: 5px; background: #333; color: #fff; border: 1px solid #555; border-radius: 3px;"
-					onblur="saveServoSetting('servo2Open')" onkeypress="if(event.key==='Enter') saveServoSetting('servo2Open')">
-			</div>
-			<div style="margin-top: 5px;">
-				<label style="color: #aaa; font-size: 0.85em;">Closed (μs):</label>
-				<input type="number" id="servo2Closed" value="1100" min="500" max="2500"
-					style="width: 100%; padding: 5px; background: #333; color: #fff; border: 1px solid #555; border-radius: 3px;"
-					onblur="saveServoSetting('servo2Closed')" onkeypress="if(event.key==='Enter') saveServoSetting('servo2Closed')">
-			</div>
-		</div>
-	</div>
 	<script>
 		const stateNames = ['IDLE', 'WINDING', 'UNWINDING', 'ERROR'];
 		const stateClasses = ['state-idle', 'state-winding', 'state-unwinding', 'state-error'];
