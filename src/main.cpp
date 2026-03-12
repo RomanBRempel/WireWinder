@@ -8,7 +8,7 @@
 #include <HTTPClient.h>
 #include <Update.h>
 
-#define FIRMWARE_VERSION "1.0.0"
+#define FIRMWARE_VERSION "1.0.2"
 #define FIRMWARE_UPDATE_CHECK_INTERVAL 3600000  // Check every 1 hour (in ms)
 
 // WiFi credentials (will be loaded from preferences)
@@ -439,6 +439,8 @@ void checkFirmwareUpdate() {
 
 	HTTPClient http;
 	String versionUrl = getManifestUrl();
+	// Add cache-busting parameter to avoid stale CDN/proxy responses.
+	versionUrl += (versionUrl.indexOf('?') == -1 ? "?ts=" : "&ts=") + String(millis());
 	
 	dbgPrintf("[OTA] Checking firmware update from: %s\n", versionUrl.c_str());
 	
@@ -689,7 +691,15 @@ void handleRoot() {
 			<button class="btn btn-stop" onclick="sendCommand('stop')">⏹️ Stop</button>
 			<button class="btn btn-unwind" onclick="sendCommand('unwind')">⬇️ Unwind</button>
 		</div>
+		<h3 style="color: #aaa;">Test Mode (No Limits)</h3>
+		<div class="button-grid">
+			<button class="btn" onclick="sendCommand('test_wind')" style="background: #FFA726;">🔧 Test Wind</button>
+			<button class="btn" onclick="sendCommand('test_unwind')" style="background: #BA68C8;">🔧 Test Unwind</button>
+		</div>
+	</div>
 
+	<div class="control-panel" id="status-panel">
+		<h2>Status</h2>
 		<div class="status-grid">
 			<div class="status-card" id="state-card">
 				<h3>System State</h3>
@@ -773,11 +783,6 @@ void handleRoot() {
 						onblur="saveServoSetting('servo2Closed')" onkeypress="if(event.key==='Enter') saveServoSetting('servo2Closed')">
 				</div>
 			</div>
-		</div>
-		<h3 style="color: #aaa;">Test Mode (No Limits)</h3>
-		<div class="button-grid">
-			<button class="btn" onclick="sendCommand('test_wind')" style="background: #FFA726;">🔧 Test Wind</button>
-			<button class="btn" onclick="sendCommand('test_unwind')" style="background: #BA68C8;">🔧 Test Unwind</button>
 		</div>
 	</div>
 
