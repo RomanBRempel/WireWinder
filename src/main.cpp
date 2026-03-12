@@ -49,7 +49,7 @@ static const int PIN_UART_TX = 22;  // Serial1 TX
 
 // Stepper motor parameters
 static const uint32_t STEPPER_MAX_SPEED = 8000;    // Maximum speed in steps/sec
-static const uint32_t STEPPER_ACCEL = 1000;        // Acceleration in steps/sec²
+static const uint32_t STEPPER_ACCEL = 4000;        // Acceleration in steps/sec²
 static const uint16_t STEPPER_MICROSTEPS = 4;     // Microstepping setting
 static const uint16_t STEPPER_RMS_CURRENT = 800;   // RMS current in mA
 static const int32_t STEPS_PER_REV = 200 * STEPPER_MICROSTEPS; // 200 full steps/rev * microsteps
