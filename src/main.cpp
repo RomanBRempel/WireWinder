@@ -536,6 +536,9 @@ bool downloadAndUpdateFirmware() {
 	
 	HTTPClient http;
 	String firmwareUrl = getBinaryUrl();
+	http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+	http.setConnectTimeout(15000);
+	http.setTimeout(30000);
 	
 	if (!http.begin(firmwareUrl)) {
 		dbgPrintln("[OTA] Failed to initialize HTTP");
@@ -553,48 +556,24 @@ bool downloadAndUpdateFirmware() {
 
 	int contentLength = http.getSize();
 	if (contentLength <= 0) {
-		dbgPrintf("[OTA] Invalid firmware size: %d\n", contentLength);
-		http.end();
-		firmwareUpdateStatus = "Invalid firmware size";
-		return false;
+		dbgPrintln("[OTA] Content length unknown, using UPDATE_SIZE_UNKNOWN");
+	} else {
+		dbgPrintf("[OTA] Firmware size: %d bytes\n", contentLength);
 	}
 
-	dbgPrintf("[OTA] Firmware size: %d bytes\n", contentLength);
-
-	if (!Update.begin(contentLength)) {
+	if (!Update.begin(contentLength > 0 ? contentLength : UPDATE_SIZE_UNKNOWN)) {
 		dbgPrintln("[OTA] Not enough space to start update");
 		http.end();
 		firmwareUpdateStatus = "Not enough flash space";
 		return false;
 	}
 
-	firmwareUpdateStatus = "0%";
+	firmwareUpdateStatus = "Flashing...";
 	unsigned long downloadStartTime = millis();
 	WiFiClient * stream = http.getStreamPtr();
+	size_t written = Update.writeStream(*stream);
 
-	size_t written = 0;
-	byte clientBuf[1024];
-	int len;
-
-	while (written < (size_t)contentLength && http.connected()) {
-		len = stream->readBytes(clientBuf, sizeof(clientBuf));
-		if (len <= 0) break;
-		
-		if (Update.write(clientBuf, len) != len) {
-			dbgPrintln("[OTA] Write failed!");
-			http.end();
-			Update.abort();
-			firmwareUpdateStatus = "Write failed";
-			return false;
-		}
-		
-		written += len;
-		int percentage = (written * 100) / contentLength;
-		firmwareUpdateStatus = String(percentage) + "%";
-		dbgPrintf("[OTA] Progress: %d%% (%d / %d bytes)\n", percentage, written, contentLength);
-	}
-
-	if (written != (size_t)contentLength) {
+	if (contentLength > 0 && written != (size_t)contentLength) {
 		dbgPrintf("[OTA] Downloaded only %d / %d bytes\n", written, contentLength);
 		http.end();
 		Update.abort();
@@ -602,8 +581,11 @@ bool downloadAndUpdateFirmware() {
 		return false;
 	}
 
-	if (!Update.end()) {
+	dbgPrintf("[OTA] Written bytes: %d\n", written);
+
+	if (!Update.end(true)) {
 		dbgPrintf("[OTA] Update failed, error: %d\n", Update.getError());
+		http.end();
 		firmwareUpdateStatus = "Update verification failed";
 		return false;
 	}
