@@ -8,7 +8,7 @@
 #include <HTTPClient.h>
 #include <Update.h>
 
-#define FIRMWARE_VERSION "1.0.4"
+#define FIRMWARE_VERSION "1.0.5"
 #define FIRMWARE_UPDATE_CHECK_INTERVAL 3600000  // Check every 1 hour (in ms)
 
 // WiFi credentials (will be loaded from preferences)
@@ -303,14 +303,7 @@ static void processApSequenceInput2(unsigned long now) {
 	}
 }
 
-// Arming / command-waiting: require channel1 to send a max PWM then neutral
-static bool waitingForArm = true;
-static bool seenArmMax = false;
-static const uint16_t ARM_MAX_THRESHOLD = 1900; // treat >= this as 'maximum' command
-static const uint16_t ARM_MIN_ACCEPT = 500;
-static const uint16_t ARM_MAX_ACCEPT = 2500;
 static String lastErrorMessage = "";
-static bool holdServoAfterArm = false;
 
 // LED indicator (built-in)
 static const int LED_PIN = 2; // onboard LED on most ESP32 dev boards
@@ -319,9 +312,6 @@ static LedMode ledMode = LED_OFF;
 static bool ledState = false;
 static unsigned long lastLedToggle = 0;
 
-
-// Diagnostics timer while waiting for arm
-static unsigned long lastArmDiag = 0;
 
 // FastAccelStepper engine and stepper instance
 static FastAccelStepperEngine stepperEngine;
@@ -630,8 +620,6 @@ void handleRoot() {
 		.state-winding { border-left-color: #FF9800; }
 		.state-unwinding { border-left-color: #9C27B0; }
 		.state-error { border-left-color: #f44336; }
-		.arm-waiting { border-left-color: #FFC107; }
-		.arm-ready { border-left-color: #4CAF50; }
 		.connection-status { padding: 10px; border-radius: 5px; margin-bottom: 20px; text-align: center; font-weight: bold; }
 		.connected { background: #4CAF50; color: white; }
 		.ap-mode { background: #2196F3; color: white; }
@@ -708,14 +696,6 @@ void handleRoot() {
 				<div class="status-value" id="state">--</div>
 				<div class="status-label">Current Operation</div>
 				<div id="errorInfo" style="display: none; margin-top: 10px; color: #f44336; font-weight: bold;"></div>
-			</div>
-			<div class="status-card" id="arm-card">
-				<h3>ARM Status</h3>
-				<div class="status-value" id="armStatus">--</div>
-				<div class="status-label">System Armed</div>
-				<div style="margin-top: 15px;">
-					<button class="btn" onclick="sendCommand('arm')" style="width: 100%; background: #4CAF50;">✓ ARM System</button>
-				</div>
 			</div>
 			<div class="status-card ap-seq" id="ap-seq-card">
 				<h3>AP Activation</h3>
@@ -1009,16 +989,6 @@ void handleRoot() {
 						errorInfo.style.display = 'none';
 					}
 
-					// Update ARM status
-					const armCard = document.getElementById('arm-card');
-					if (data.armed) {
-						document.getElementById('armStatus').textContent = 'ARMED';
-						armCard.className = 'status-card arm-ready';
-					} else {
-						document.getElementById('armStatus').textContent = 'WAITING';
-						armCard.className = 'status-card arm-waiting';
-					}
-
 					document.getElementById('input1').textContent = data.input1 + ' μs';
 					document.getElementById('input2').textContent = data.input2 + ' μs';
 					document.getElementById('rawInput1').textContent = 'Raw: ' + data.rawInput1 + ' μs';
@@ -1257,7 +1227,7 @@ void handleStatus() {
 	// Build JSON response
 	String json = "{";
 	json += "\"state\":" + String((int)currentState) + ",";
-	json += "\"armed\":" + String(waitingForArm ? "false" : "true") + ",";
+	json += "\"armed\":true,";
 	json += "\"rawInput1\":" + String(rawPulse1) + ",";
 	json += "\"rawInput2\":" + String(rawPulse2) + ",";
 	json += "\"input1\":" + String(lastInput1Value) + ",";
@@ -1312,14 +1282,7 @@ void handleCommand() {
 	bool success = true;
 	String message = "OK";
 
-	if (cmd == "arm") {
-		// ARM system (emulate PWM arming sequence)
-		waitingForArm = false;
-		seenArmMax = true;
-		holdServoAfterArm = true;
-		dbgPrintln("System ARMED via web command");
-		message = "System armed successfully";
-	} else if (cmd == "wind") {
+	if (cmd == "wind") {
 		// Start winding (input1 below neutral)
 		controlMode = CONTROL_WEB;
 		testMode = false;
@@ -1835,13 +1798,7 @@ void loop() {
 	LedMode targetLedMode = LED_OFF;
 	if (currentState == STATE_ERROR) {
 		targetLedMode = LED_FAST;
-	} else if (waitingForArm) {
-		if (WiFi.getMode() == WIFI_AP) {
-			targetLedMode = LED_FAST;
-		} else {
-			targetLedMode = LED_SLOW;
-		}
-	} else if (!waitingForArm && currentState == STATE_IDLE) {
+	} else if (currentState == STATE_IDLE) {
 		targetLedMode = LED_ON;
 	} else {
 		targetLedMode = LED_OFF;
@@ -1880,48 +1837,7 @@ void loop() {
 		}
 	}
 
-	// Arming sequence: require a MAX on channel1 then a neutral to enable inputs
-	// Web control bypasses arming
-	if (waitingForArm && controlMode != CONTROL_WEB) {
-		// Only consider pulses in arm-accept range
-		if (pulseInAcceptRange(pulse1, ARM_MIN_ACCEPT, ARM_MAX_ACCEPT)) {
-			// detect max pulse (allow pulses >= ARM_MAX_THRESHOLD)
-			if (pulse1 >= ARM_MAX_THRESHOLD) {
-				seenArmMax = true;
-				dbgPrintln("Arm: saw max pulse on channel1");
-			}
-			// if we've seen max and now neutral, finish arming
-			if (seenArmMax && isInDeadzone(pulse1)) {
-				waitingForArm = false;
-				holdServoAfterArm = true;
-				dbgPrintln("Armed: channel1 max->neutral sequence received");
-			}
-		} else {
-			// out-of-range pulses are ignored for arming
-		}
-		// print diagnostics about inputs while waiting for arm (rate-limited)
-		if (now - lastArmDiag >= 500UL) {
-			dbgPrintf("ARM WAIT DIAG: pulse1:%uus pulse2:%uus seenMax:%d\n", pulse1, pulse2, seenArmMax ? 1 : 0);
-			lastArmDiag = now;
-		}
-		// Track AP activation max-min sequence even while waiting for ARM
-		if (pulseInAcceptRange(pulse1, 800, 2000)) {
-			lastInput1Value = pulse1;
-		}
-		if (pulseInAcceptRange(pulse2, 800, 2000)) {
-			lastInput2Value = pulse2;
-		}
-		processApSequenceInput1(now);
-		processApSequenceInput2(now);
-		// while waiting, hold stepper with torque and servo safe and ignore other inputs
-		setStepperHold();
-		servo2.writeMicroseconds(servo2ClosedPos);
-		currentServo2Pulse = servo2ClosedPos;
-		// skip normal control until armed
-		return;
-	}
-
-	// Process INPUT1 for winding motor control (only when armed)
+	// Process INPUT1 for winding motor control
 	// Accept only pulses in valid control range [800..2000]
 	if (pulseInAcceptRange(pulse1, 800, 2000)) {
 		lastInput1Value = pulse1;
@@ -2102,37 +2018,21 @@ void loop() {
 	processApSequenceInput2(now);
 
 	// Control SERVO2 (gate) - change only when INPUT2 crosses deadzone thresholds
-	if (holdServoAfterArm) {
-		if (currentServo2Pulse != servo2ClosedPos) {
-			servo2.writeMicroseconds(servo2ClosedPos);
-			currentServo2Pulse = servo2ClosedPos;
-		}
-		if (controlMode == CONTROL_WEB) {
-			if (isInDeadzone(pulse2)) {
-				holdServoAfterArm = false;
-			}
-		} else {
-			if (pulse2 != 0 && isInDeadzone(pulse2)) {
-				holdServoAfterArm = false;
-			}
-		}
+	const uint16_t upper = INPUT_NEUTRAL + INPUT_DEADZONE;
+	const uint16_t lower = INPUT_NEUTRAL - INPUT_DEADZONE;
+	uint16_t target2 = currentServo2Pulse; // default: no change
+	if (lastInput2Value > upper) {
+		// Above neutral => open
+		target2 = servo2OpenPos;
+	} else if (lastInput2Value < lower) {
+		// Below neutral => closed
+		target2 = servo2ClosedPos;
 	} else {
-		const uint16_t upper = INPUT_NEUTRAL + INPUT_DEADZONE;
-		const uint16_t lower = INPUT_NEUTRAL - INPUT_DEADZONE;
-		uint16_t target2 = currentServo2Pulse; // default: no change
-		if (lastInput2Value > upper) {
-			// Above neutral => open
-			target2 = servo2OpenPos;
-		} else if (lastInput2Value < lower) {
-			// Below neutral => closed
-			target2 = servo2ClosedPos;
-		} else {
-			// within deadzone: do not change state
-		}
-		if (target2 != currentServo2Pulse) {
-			servo2.writeMicroseconds(target2);
-			currentServo2Pulse = target2;
-		}
+		// within deadzone: do not change state
+	}
+	if (target2 != currentServo2Pulse) {
+		servo2.writeMicroseconds(target2);
+		currentServo2Pulse = target2;
 	}
 
 	// Diagnostics
