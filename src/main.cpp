@@ -8,7 +8,7 @@
 #include <HTTPClient.h>
 #include <Update.h>
 
-#define FIRMWARE_VERSION "1.0.6"
+#define FIRMWARE_VERSION "1.0.7"
 #define FIRMWARE_UPDATE_CHECK_INTERVAL 3600000  // Check every 1 hour (in ms)
 
 // WiFi credentials (will be loaded from preferences)
@@ -758,7 +758,7 @@ void handleRoot() {
 				minlength="8" maxlength="63">
 		</div>
 		<div class="button-grid">
-			<button class="btn" onclick="loadWiFiSettings()" style="background: #2196F3; flex: 1; margin-right: 5px;">📖 Load</button>
+			<button class="btn" onclick="loadWiFiSettings(true)" style="background: #2196F3; flex: 1; margin-right: 5px;">📖 Load</button>
 			<button class="btn" onclick="saveWiFiSettings()" style="background: #4CAF50; flex: 1; margin-left: 5px;">💾 Save</button>
 		</div>
 		<div style="margin-top: 12px; padding: 10px; background: #333; border-radius: 5px; font-size: 0.85em; color: #999;">
@@ -774,6 +774,12 @@ void handleRoot() {
 		let useUptimeClock = false;
 		let uptimeBaseSec = 0;
 		let uptimeBaseMs = 0;
+		let wifiFormDirty = false;
+
+		function isEditingWiFiFields() {
+			const active = document.activeElement;
+			return !!(active && (active.id === 'wifi-ssid' || active.id === 'wifi-password'));
+		}
 
 		function renderControlMode(mode) {
 			if (mode === 'web') {
@@ -1076,12 +1082,14 @@ void handleRoot() {
 		}
 
 		// WiFi Configuration Functions
-		function loadWiFiSettings() {
+		function loadWiFiSettings(forceApply = false) {
 			fetch('/wifi/config')
 				.then(response => response.json())
 				.then(data => {
-					document.getElementById('wifi-ssid').value = data.ssid || '';
-					document.getElementById('wifi-password').value = data.password || '';
+					if (forceApply || (!wifiFormDirty && !isEditingWiFiFields())) {
+						document.getElementById('wifi-ssid').value = data.ssid || '';
+						document.getElementById('wifi-password').value = data.password || '';
+					}
 					document.getElementById('wifi-connection-status').textContent = data.connectionStatus || 'Unknown';
 					document.getElementById('wifi-ip-address').textContent = data.wifiIP || '--';
 					
@@ -1122,11 +1130,12 @@ void handleRoot() {
 				.then(response => response.json())
 				.then(data => {
 					if (data.success) {
+						wifiFormDirty = false;
 						alert('WiFi settings saved! Device will reconnect shortly.');
 						document.getElementById('wifi-connection-status').textContent = 'Reconnecting...';
 						document.getElementById('wifi-connection-status').style.color = '#FFC107';
 						// Try to reload settings after a delay
-						setTimeout(loadWiFiSettings, 5000);
+						setTimeout(() => loadWiFiSettings(true), 5000);
 					} else {
 						alert('Error saving settings: ' + (data.error || 'Unknown error'));
 					}
@@ -1137,8 +1146,15 @@ void handleRoot() {
 				});
 		}
 
+		document.getElementById('wifi-ssid').addEventListener('input', () => {
+			wifiFormDirty = true;
+		});
+		document.getElementById('wifi-password').addEventListener('input', () => {
+			wifiFormDirty = true;
+		});
+
 		// Initial WiFi settings load
-		loadWiFiSettings();
+		loadWiFiSettings(true);
 		// Reload WiFi settings every 5 seconds
 		setInterval(loadWiFiSettings, 5000);
 

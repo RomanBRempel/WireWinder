@@ -1,4 +1,5 @@
-ArduinoOTA
-Update
-HTTPClient
 ESP32Servo
+ArduinoOTA
+HTTPClient
+FastAccelStepper
+Update
