@@ -8,7 +8,7 @@
 #include <HTTPClient.h>
 #include <Update.h>
 
-#define FIRMWARE_VERSION "1.0.5"
+#define FIRMWARE_VERSION "1.0.6"
 #define FIRMWARE_UPDATE_CHECK_INTERVAL 3600000  // Check every 1 hour (in ms)
 
 // WiFi credentials (will be loaded from preferences)
@@ -22,40 +22,10 @@ const char* DEFAULT_WIFI_PASSWORD = "87770759";
 const char* AP_SSID = "WireWinder";
 const char* AP_PASSWORD = "12345678"; // Minimum 8 characters for WPA2
 
-// Firmware update server (fallback base URL)
-// For GitHub OTA prefer direct RAW links in FIRMWARE_MANIFEST_URL/FIRMWARE_BINARY_URL.
-const char* FIRMWARE_SERVER_URL = "https://raw.githubusercontent.com/RomanBRempel/WireWinder/main/ota";
-const char* FIRMWARE_MANIFEST_FILE = "version.json";  // Server should have: version.json, wirewinder.bin
-// Optional direct URLs. If set, they are used instead of FIRMWARE_SERVER_URL + file name.
-// GitHub RAW format: https://raw.githubusercontent.com/<owner>/<repo>/<branch>/ota/<file>
+// OTA update source: GitHub RAW only
+// Format: https://raw.githubusercontent.com/<owner>/<repo>/<branch>/ota/<file>
 const char* FIRMWARE_MANIFEST_URL = "https://raw.githubusercontent.com/RomanBRempel/WireWinder/main/ota/version.json";
 const char* FIRMWARE_BINARY_URL = "https://raw.githubusercontent.com/RomanBRempel/WireWinder/main/ota/wirewinder.bin";
-
-static String buildFirmwareUrl(const char* fileName) {
-	String base = String(FIRMWARE_SERVER_URL);
-	if (base.endsWith("/")) {
-		return base + String(fileName);
-	}
-	return base + "/" + String(fileName);
-}
-
-static bool isGoogleDriveFolderUrl(const String& url) {
-	return url.indexOf("drive.google.com/drive/folders/") != -1;
-}
-
-static String getManifestUrl() {
-	if (strlen(FIRMWARE_MANIFEST_URL) > 0) {
-		return String(FIRMWARE_MANIFEST_URL);
-	}
-	return buildFirmwareUrl(FIRMWARE_MANIFEST_FILE);
-}
-
-static String getBinaryUrl() {
-	if (strlen(FIRMWARE_BINARY_URL) > 0) {
-		return String(FIRMWARE_BINARY_URL);
-	}
-	return buildFirmwareUrl("wirewinder.bin");
-}
 
 // Web server
 WebServer server(80);
@@ -417,18 +387,8 @@ void checkFirmwareUpdate() {
 	firmwareUpdateStatus = "Checking...";
 	firmwareCheckStartTime = millis();
 
-	String baseUrl = String(FIRMWARE_SERVER_URL);
-	if (isGoogleDriveFolderUrl(baseUrl)) {
-		firmwareUpdateAvailable = false;
-		availableFirmwareVersion = "";
-		firmwareUpdateStatus = "Invalid OTA URL: use direct file link";
-		dbgPrintln("[OTA] Invalid OTA URL: Google Drive folder link is not a direct file URL");
-		lastFirmwareCheckTime = millis();
-		return;
-	}
-
 	HTTPClient http;
-	String versionUrl = getManifestUrl();
+	String versionUrl = String(FIRMWARE_MANIFEST_URL);
 	// Add cache-busting parameter to avoid stale CDN/proxy responses.
 	versionUrl += (versionUrl.indexOf('?') == -1 ? "?ts=" : "&ts=") + String(millis());
 	
@@ -508,14 +468,7 @@ bool downloadAndUpdateFirmware() {
 	}
 
 	firmwareUpdateStatus = "Downloading...";
-	dbgPrintf("[OTA] Starting firmware download from: %s\n", FIRMWARE_SERVER_URL);
-
-	String baseUrl = String(FIRMWARE_SERVER_URL);
-	if (isGoogleDriveFolderUrl(baseUrl)) {
-		dbgPrintln("[OTA] Invalid OTA URL for binary download: Google Drive folder link is not supported");
-		firmwareUpdateStatus = "Invalid OTA URL: use direct file link";
-		return false;
-	}
+	dbgPrintf("[OTA] Starting firmware download from: %s\n", FIRMWARE_BINARY_URL);
 
 	// Disable stepper and motors during update
 	if (stepper) {
@@ -525,7 +478,7 @@ bool downloadAndUpdateFirmware() {
 	servo2.detach();
 	
 	HTTPClient http;
-	String firmwareUrl = getBinaryUrl();
+	String firmwareUrl = String(FIRMWARE_BINARY_URL);
 	http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
 	http.setConnectTimeout(15000);
 	http.setTimeout(30000);
